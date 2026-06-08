@@ -1,0 +1,24 @@
+# vggt-dyn runtime dependencies
+# Install in the `vggt` conda environment (see README.md).
+# VGGT, MonST3R, RAFT and SAM2 are expected as git submodules / sibling repos.
+
+# Core
+torch>=2.0
+torchvision
+numpy
+scipy
+
+# Pose utilities
+roma>=1.4.0            # differentiable rotation (rotvec_to_rotmat)
+
+# Optical flow
+# RAFT weights: symlink from monst3r/third_party/RAFT/models → third_party/RAFT/models
+
+# Visualisation / misc
+tqdm
+opencv-python
+tifffile                # for SCARED .tiff depth maps
+matplotlib
+
+# Optional: SAM2 temporal mask refinement
+# sam2  (install from monst3r/third_party/sam2)
