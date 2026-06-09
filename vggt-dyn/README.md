@@ -112,10 +112,15 @@ vggt-dyn/
 │   ├── scared.py                 # SCARED surgical (Chamfer)
 │   └── dtu.py                    # DTU multi-view (Chamfer + Sim(3))
 │
-├── finetune/                     # LoRA 微調工具（與 TTO 核心分離）
-│   ├── lora.py                   # LoRA 注入 / 儲存 / 載入
-│   ├── datasets.py               # SintelClipDataset, BonnClipDataset
-│   └── train.py                  # 訓練主流程 CLI
+├── finetune/                     # MonST3R-style freeze 微調工具（與 TTO 核心分離）
+│   ├── datasets/
+│   │   ├── __init__.py           # dataset registry / builder
+│   │   ├── common.py             # 共用影像/相機/視窗工具
+│   │   ├── point_odyssey.py      # PointOdyssey clip dataset
+│   │   ├── tartanair.py          # TartanAir clip dataset
+│   │   ├── spring.py             # Spring clip dataset
+│   │   └── waymo.py              # Waymo clip dataset
+│   └── train.py                  # 訓練主流程 CLI（單資料集 / 混合比例）
 │
 ├── scripts/                      # 批次執行 & 工具腳本
 │   ├── batch.py                  # 統一批次執行器（depth / pose / single_frame）
@@ -167,11 +172,10 @@ Test-time 優化器，持有可訓練殘差 `delta_depth` / `delta_rotvec` / `de
 
 #### `finetune/`
 
-LoRA 微調工具，與核心 TTO 套件完全分離：
+MonST3R-style freeze 微調工具，與核心 TTO 套件完全分離：
 
-- `lora.py`：`inject_lora` / `save_lora` / `load_lora` / `merge_lora`
-- `datasets.py`：`SintelClipDataset`、`BonnClipDataset`（sliding-window clips）
-- `train.py`：訓練 CLI（`python finetune/train.py sintel ...`）
+- `datasets/`：依資料集模組化管理（`point_odyssey`、`tartanair`、`spring`、`waymo`）
+- `train.py`：凍結大部分 backbone，只訓練末端 blocks 與 heads；支援單資料集與混合比例抽樣
 
 #### `scripts/batch.py`
 
@@ -279,27 +283,30 @@ python scripts/visualize.py \
 
 ---
 
-## LoRA 微調（選用）
+## 微調（MonST3R-style freeze，選用）
 
 ```bash
 cd vggt-dyn
 
-# Sintel，LoRA on global_blocks
-python finetune/train.py sintel \
-  --image_dir ../data/sintel/training/final \
-  --depth_dir ../data/sintel/training/depth \
-  --cam_dir   ../data/sintel/training/camdata_left \
-  --flow_dir  ../data/sintel/training/flow \
-  --ckpt      ../vggt/checkpoints/VGGT-1B.pt \
-  --output    finetune_outputs/sintel_lora \
-  --lora_mode global --lora_rank 16 --epochs 3
+# 單一資料集（PointOdyssey）
+python finetune/train.py \
+  --dataset point_odyssey \
+  --root ../data/point_odyssey \
+  --split train \
+  --ckpt ../vggt/checkpoints/VGGT-1B.pt \
+  --output finetune_outputs/po_freeze \
+  --epochs 3 --train_last_n_blocks 8 --amp
 
-# Bonn，head-only（最快）
-python finetune/train.py bonn \
-  --scene_dir ../data/bonn/rgbd_bonn_dataset/rgbd_bonn_balloon2 \
-  --ckpt      ../vggt/checkpoints/VGGT-1B.pt \
-  --output    finetune_outputs/bonn_heads \
-  --lora_mode heads --epochs 5
+# 混合比例抽樣（MonST3R 比例範例）
+python finetune/train.py \
+  --mix \
+  --mix_datasets point_odyssey,tartanair,spring,waymo \
+  --mix_weights 10000,5000,1000,4000 \
+  --mix_roots point_odyssey=../data/point_odyssey,tartanair=../data/tartanair,spring=../data/spring,waymo=../data/waymo_processed \
+  --mix_samples_per_epoch 20000 \
+  --ckpt ../vggt/checkpoints/VGGT-1B.pt \
+  --output finetune_outputs/mix_freeze \
+  --epochs 10 --train_last_n_blocks 8 --amp
 ```
 
 ---

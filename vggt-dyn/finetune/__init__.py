@@ -1,1 +1,1 @@
-# finetune package — LoRA fine-tuning utilities for VGGT on dynamic scenes
+# finetune package — MonST3R-style VGGT fine-tuning utilities
