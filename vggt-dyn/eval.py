@@ -125,6 +125,16 @@ def parse_args():
                     help="KITTI drive name to filter GT files, e.g. "
                          "'2011_09_26_drive_0002_sync'")
 
+    # ── SINTEL POSE ──────────────────────────────────────────────────────────
+    spp = sub.add_parser("sintel_pose", parents=[common_parent],
+                         help="Sintel pose evaluation (ATE/RPE)")
+    spp.add_argument("--gt_cam_dir",       required=True,
+                     help="Sintel camdata_left/<seq> directory")
+    spp.add_argument("--gt_traj_dir",      default=None,
+                     help="deprecated alias of --gt_cam_dir")
+    spp.add_argument("--pose_eval_stride", type=int, default=1,
+                     help="frame stride for evaluation")
+
     return p.parse_args()
 
 
@@ -150,3 +160,10 @@ if __name__ == "__main__":
     elif args.mode == "kitti":
         from evaluators.kitti import KITTIEvaluator
         KITTIEvaluator().run(args)
+
+    elif args.mode == "sintel_pose":
+        # resolve deprecated alias
+        if args.gt_cam_dir is None and args.gt_traj_dir is not None:
+            args.gt_cam_dir = args.gt_traj_dir
+        from evaluators.sintel_pose import SintelPoseEvaluator
+        SintelPoseEvaluator().run(args)

@@ -1,23 +1,14 @@
 #!/usr/bin/env python3
 """Sintel pose evaluation aligned with MonST3R-style protocol.
 
+Moved from sintel_pose_eval.py to evaluators/sintel_pose.py for consistency
+with other dataset evaluators.
+
 Inputs:
-  - predicted camera extrinsics from run.py output:
-      <output_dir>/extrinsics.npy   shape [S, 3, 4], cam-from-world (world->cam)
-  - Sintel GT camera files:
-      <gt_cam_dir>/frame_XXXX.cam   each contains intrinsics + extrinsics (world->cam)
+  - predicted camera extrinsics: <output_dir>/extrinsics.npy  [S, 3, 4]
+  - Sintel GT camera files:      <gt_cam_dir>/frame_XXXX.cam
 
-Metrics:
-  - ATE RMSE on translation after global Sim(3) alignment
-  - RPE translation RMSE (delta=1 frame)
-  - RPE rotation RMSE in degrees (delta=1 frame)
-
-This script saves:
-  - <output_dir>/pred_traj.txt
-  - <output_dir>/pred_traj_aligned.txt
-  - <output_dir>/gt_traj.txt
-  - <output_dir>/pose_eval_metric.txt
-  - <output_dir>/eval_sintel_pose.json
+Metrics: ATE RMSE, RPE translation RMSE, RPE rotation RMSE (delta=1)
 """
 
 import os
@@ -255,3 +246,68 @@ def main():
 
 if __name__ == "__main__":
     main()
+
+
+# ---------------------------------------------------------------------------
+# Evaluator class — used by eval.py dispatcher
+# ---------------------------------------------------------------------------
+
+class SintelPoseEvaluator:
+    """Wrapper around the standalone evaluation functions for use in eval.py."""
+
+    def run(self, args):
+        """Run Sintel pose evaluation.
+
+        Expected args attributes:
+            output_dir      : run.py output directory
+            gt_cam_dir      : Sintel camdata_left/<seq> directory
+            pose_eval_stride: frame stride (default 1)
+        """
+        output_dir = os.path.abspath(args.output_dir)
+        gt_cam_dir = os.path.abspath(args.gt_cam_dir)
+        stride = getattr(args, "pose_eval_stride", 1)
+
+        gt_c2w, gt_ts     = _load_gt_sintel_traj(gt_cam_dir, stride=stride)
+        pred_c2w, pred_ts = _load_pred_traj(output_dir, stride=stride)
+
+        n = min(gt_c2w.shape[0], pred_c2w.shape[0])
+        if n < 2:
+            raise RuntimeError(f"Not enough frames for pose eval: {n}")
+
+        gt_c2w   = gt_c2w[:n]
+        pred_c2w = pred_c2w[:n]
+        gt_ts    = gt_ts[:n]
+        pred_ts  = pred_ts[:n]
+
+        metrics, pred_aligned = _compute_metrics(gt_c2w, pred_c2w)
+
+        pred_tum         = _poses_to_tum(pred_c2w)
+        gt_tum           = _poses_to_tum(gt_c2w)
+        pred_aligned_tum = _poses_to_tum(pred_aligned)
+
+        os.makedirs(output_dir, exist_ok=True)
+        _save_tum(pred_tum,         pred_ts, os.path.join(output_dir, "pred_traj.txt"))
+        _save_tum(pred_aligned_tum, gt_ts,   os.path.join(output_dir, "pred_traj_aligned.txt"))
+        _save_tum(gt_tum,           gt_ts,   os.path.join(output_dir, "gt_traj.txt"))
+
+        metric_txt = os.path.join(output_dir, "pose_eval_metric.txt")
+        with open(metric_txt, "w") as f:
+            f.write("Sintel Pose Evaluation\n")
+            f.write(f"Frames: {n}\n")
+            f.write(f"ATE: {metrics['ate']:.6f}\n")
+            f.write(f"RPE trans: {metrics['rpe_trans']:.6f}\n")
+            f.write(f"RPE rot: {metrics['rpe_rot']:.6f}\n")
+            f.write(f"Scale: {metrics['scale']:.6f}\n")
+
+        result = {"num_frames": int(n), "pose_eval_stride": int(stride), **metrics}
+        result_json = os.path.join(output_dir, "eval_sintel_pose.json")
+        with open(result_json, "w") as f:
+            import json as _json
+            _json.dump(result, f, indent=2)
+
+        print(
+            f"[eval:sintel_pose] ATE={metrics['ate']:.6f}, "
+            f"RPE_t={metrics['rpe_trans']:.6f}, RPE_r={metrics['rpe_rot']:.6f}"
+        )
+        print(f"[eval:sintel_pose] saved → {result_json}")
+

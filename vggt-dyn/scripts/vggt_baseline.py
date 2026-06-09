@@ -1,18 +1,19 @@
 #!/usr/bin/env python3
-"""Run original VGGT depth inference in single-frame mode.
+"""Original VGGT depth inference in single-frame mode (no TTO, no dynamic mask).
 
-This script performs pure feed-forward VGGT prediction per image (S=1 each
-forward pass), without any test-time optimization, then saves outputs in a
-layout compatible with vggt-dyn/eval.py:
+This is the **native VGGT baseline**: one feed-forward pass per frame (S=1),
+without any test-time optimization.  Outputs are saved in the layout expected
+by eval.py / scripts/batch.py single_frame:
 
     <output>/depth/0000.npy
     <output>/depth_orig_res/0000.npy
 
-Usage example:
-    python run_vggt_single_frame.py \
+Invoked by scripts/batch.py single_frame.  Can also be run standalone:
+
+    python scripts/vggt_baseline.py \
       --images "../data/bonn/rgbd_bonn_dataset/rgbd_bonn_balloon2/rgb_110/*.png" \
       --checkpoint ../vggt/checkpoints/VGGT-1B.pt \
-      --output outputs/vggt_single/bonn_balloon2
+      --output outputs/vggt_baseline/bonn_balloon2
 """
 
 import os

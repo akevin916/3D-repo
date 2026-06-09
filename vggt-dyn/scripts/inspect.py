@@ -41,11 +41,12 @@ import json
 import argparse
 import numpy as np
 
-_SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-if _SCRIPT_DIR not in sys.path:
-    sys.path.insert(0, _SCRIPT_DIR)
+_SCRIPT_DIR  = os.path.dirname(os.path.abspath(__file__))
+_PROJECT_DIR = os.path.dirname(_SCRIPT_DIR)  # vggt-dyn/
+if _PROJECT_DIR not in sys.path:
+    sys.path.insert(0, _PROJECT_DIR)
 
-_VGGT_REPO = os.path.join(_SCRIPT_DIR, "vggt")
+_VGGT_REPO = os.path.join(_PROJECT_DIR, "vggt")
 if _VGGT_REPO not in sys.path:
     sys.path.insert(0, _VGGT_REPO)
 
