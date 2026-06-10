@@ -293,20 +293,20 @@ python finetune/train.py \
   --dataset point_odyssey \
   --root ../data/point_odyssey \
   --split train \
-  --ckpt ../vggt/checkpoints/VGGT-1B.pt \
+  --ckpt ./finetune/checkpoints/VGGT-1B.pt \
   --output finetune_outputs/po_freeze \
   --epochs 3 --train_last_n_blocks 8 --amp
 
 # 混合比例抽樣（MonST3R 比例範例）
-python finetune/train.py \
+OPENCV_IO_ENABLE_OPENEXR=1 python finetune/train.py \
   --mix \
   --mix_datasets point_odyssey,tartanair,spring,waymo \
   --mix_weights 10000,5000,1000,4000 \
   --mix_roots point_odyssey=../data/point_odyssey,tartanair=../data/tartanair,spring=../data/spring,waymo=../data/waymo_processed \
   --mix_samples_per_epoch 20000 \
-  --ckpt ../vggt/checkpoints/VGGT-1B.pt \
+  --ckpt ./finetune/checkpoints/VGGT-1B.pt \
   --output finetune_outputs/mix_freeze \
-  --epochs 10 --train_last_n_blocks 8 --amp
+  --epochs 10 --train_last_n_blocks 0 --clip_len 2 --amp
 ```
 
 ---

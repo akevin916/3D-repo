@@ -23,6 +23,7 @@ def build_dataset(args):
             difficulty=args.difficulty,
             clip_len=args.clip_len,
             stride=args.stride,
+            max_depth=args.max_depth,
         )
     if name == "waymo":
         return WaymoClipDataset(

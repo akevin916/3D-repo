@@ -21,11 +21,7 @@ class PointOdysseyClipDataset(torch.utils.data.Dataset):
     ):
         base = os.path.join(root, split)
         if not os.path.isdir(base):
-            alt = os.path.join(root, "sample")
-            if os.path.isdir(alt):
-                base = alt
-            else:
-                raise FileNotFoundError(f"PointOdyssey split folder not found: {base}")
+            raise FileNotFoundError(f"PointOdyssey split folder not found: {base}")
 
         self.max_depth = max_depth
         self.samples: List[dict] = []

@@ -5,7 +5,7 @@ import h5py
 import numpy as np
 import torch
 
-from .common import load_rgb, sliding_windows
+from .common import center_crop_to_principal_point, load_rgb_np, sliding_windows
 
 SPRING_BASELINE = 0.065
 
@@ -64,22 +64,32 @@ class SpringClipDataset(torch.utils.data.Dataset):
 
     def __getitem__(self, idx):
         s = self.samples[idx]
-        imgs, depths, Ks, Es = [], [], [], []
+        imgs_np, depths_np, Ks_np, Es = [], [], [], []
 
         for i in s["idxs"]:
-            imgs.append(load_rgb(os.path.join(s["rgb_dir"], s["rgbs"][i])))
+            imgs_np.append(load_rgb_np(os.path.join(s["rgb_dir"], s["rgbs"][i])))
 
             fx, fy, cx, cy = [float(x) for x in s["intr"][i]]
+
             disp = read_dsp5(os.path.join(s["dsp_dir"], s["dsps"][i])).astype(np.float32)
+            # Spring disparity maps are the same resolution as RGB; invalid pixels
+            # (zero or near-zero disparity) map to infinite/negative depth — mark as 0.
             disp = np.where(disp <= 1e-8, np.nan, disp)
             depth = fx * SPRING_BASELINE / disp
-            depth = np.where(np.isfinite(depth), depth, 0.0)
-            depth = np.clip(depth, 0, self.max_depth)
-            depths.append(torch.from_numpy(depth.astype(np.float32)))
+            valid = np.isfinite(depth) & (depth > 0)
+            depth = np.where(valid, np.clip(depth, 0, self.max_depth), 0.0).astype(np.float32)
+            depths_np.append(depth)
 
             K = np.array([[fx, 0.0, cx], [0.0, fy, cy], [0.0, 0.0, 1.0]], dtype=np.float32)
-            Ks.append(torch.from_numpy(K))
+            Ks_np.append(K)
             Es.append(torch.from_numpy(s["ext"][i][:3, :]))
+
+        # Center crop around the principal point (MonST3R alignment).
+        imgs_np, depths_np, Ks_np = center_crop_to_principal_point(imgs_np, depths_np, Ks_np)
+
+        imgs = [torch.from_numpy(img.transpose(2, 0, 1)) for img in imgs_np]
+        depths = [torch.from_numpy(d) for d in depths_np]
+        Ks = [torch.from_numpy(K) for K in Ks_np]
 
         S, H, W = len(imgs), depths[0].shape[0], depths[0].shape[1]
         return {

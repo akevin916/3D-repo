@@ -33,7 +33,9 @@ class TartanAirClipDataset(torch.utils.data.Dataset):
         difficulty: str = "Hard",
         clip_len: int = 8,
         stride: int = 4,
+        max_depth: float = 200.0,
     ):
+        self.max_depth = max_depth
         self.samples: List[dict] = []
         base = os.path.join(root, split)
         intrinsics = make_intrinsics(320.0, 320.0, 320.0, 240.0)
@@ -72,6 +74,7 @@ class TartanAirClipDataset(torch.utils.data.Dataset):
         for i in s["idxs"]:
             imgs.append(load_rgb(os.path.join(s["rgb_dir"], s["rgbs"][i])))
             depth = np.load(os.path.join(s["dpt_dir"], s["dpts"][i])).astype(np.float32)
+            depth = np.clip(depth, 0, self.max_depth)
             depths.append(torch.from_numpy(depth))
             c2w = tartan_pose_to_c2w(s["poses"][i])
             Es.append(torch.from_numpy(c2w_to_w2c(c2w)))
