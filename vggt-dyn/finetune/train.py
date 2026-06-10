@@ -16,11 +16,8 @@ import sys
 from datetime import datetime
 from typing import Dict, Tuple
 
-import random
-
 import numpy as np
 import torch
-import torch.nn.functional as F
 from torch.utils.data import ConcatDataset, WeightedRandomSampler
 
 # ── project root on sys.path ───────────────────────────────────────────────
@@ -212,67 +209,6 @@ def _compute_world_points_from_depth(
     R_T = R.transpose(1, 2)
     pts_w = torch.einsum("sij,spj->spi", R_T, pts_c - t.unsqueeze(1))
     return pts_w.reshape(S, H, W, 3)
-
-
-def _random_crop_aug(
-    images: torch.Tensor,     # [S, 3, H, W]
-    depths: torch.Tensor,     # [S, H, W]
-    intrinsics: torch.Tensor, # [S, 3, 3]
-    aug_crop: int,
-) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    """Randomly crop up to aug_crop pixels from each spatial dimension.
-
-    Mirrors MonST3R's aug_crop: a random offset is added to the target resolution
-    so the final crop removes a random border, introducing slight scale/position jitter.
-    The crop is applied symmetrically (half from each side, per axis) and K is updated.
-    """
-    if aug_crop <= 0:
-        return images, depths, intrinsics
-    _, _, H, W = images.shape
-    dy = random.randint(0, aug_crop)
-    dx = random.randint(0, aug_crop)
-    y0 = dy // 2
-    x0 = dx // 2
-    y1 = H - (dy - y0)
-    x1 = W - (dx - x0)
-    if y1 <= y0 or x1 <= x0:
-        return images, depths, intrinsics
-    images = images[:, :, y0:y1, x0:x1]
-    depths = depths[:, y0:y1, x0:x1]
-    intrinsics = intrinsics.clone()
-    intrinsics[:, 0, 2] -= x0
-    intrinsics[:, 1, 2] -= y0
-    return images, depths, intrinsics
-
-
-def _resize_to_patch_multiple(
-    images: torch.Tensor,     # [S, 3, H, W]
-    depths: torch.Tensor,     # [S, H, W]
-    intrinsics: torch.Tensor, # [S, 3, 3]
-    patch_multiple: int,
-) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
-    """Resize clip to dimensions divisible by patch size and scale intrinsics."""
-    _, _, h, w = images.shape
-    new_h = (h // patch_multiple) * patch_multiple
-    new_w = (w // patch_multiple) * patch_multiple
-
-    if new_h <= 0 or new_w <= 0:
-        raise ValueError(f"Invalid resize target from {(h, w)} with patch_multiple={patch_multiple}")
-    if new_h == h and new_w == w:
-        return images, depths, intrinsics
-
-    scale_y = new_h / float(h)
-    scale_x = new_w / float(w)
-
-    images = F.interpolate(images, size=(new_h, new_w), mode="bilinear", align_corners=False)
-    depths = F.interpolate(depths.unsqueeze(1), size=(new_h, new_w), mode="nearest").squeeze(1)
-
-    intrinsics = intrinsics.clone()
-    intrinsics[:, 0, 0] *= scale_x
-    intrinsics[:, 1, 1] *= scale_y
-    intrinsics[:, 0, 2] *= scale_x
-    intrinsics[:, 1, 2] *= scale_y
-    return images, depths, intrinsics
 
 
 def monst3r_style_loss(
@@ -485,19 +421,7 @@ def train(args: argparse.Namespace) -> None:
             extrinsics = batch["extrinsics"].squeeze(0).to(device)
             intrinsics = batch["intrinsics"].squeeze(0).to(device)
 
-            # Random spatial crop augmentation (MonST3R aug_crop style).
-            images, depths, intrinsics = _random_crop_aug(
-                images, depths, intrinsics, aug_crop=args.aug_crop
-            )
-
-            images, depths, intrinsics = _resize_to_patch_multiple(
-                images,
-                depths,
-                intrinsics,
-                patch_multiple=args.patch_multiple,
-            )
-
-            # Per-frame color jitter (applied after resize so the tensor is clean).
+            # Per-frame color jitter (image is already a fixed-size tensor from the dataset).
             if color_jitter is not None:
                 images = torch.stack([color_jitter(img) for img in images])
 
@@ -647,13 +571,13 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--clip_len", type=int, default=8)
     p.add_argument("--stride", type=int, default=4)
     p.add_argument("--max_depth", type=float, default=200.0)
-    p.add_argument("--patch_multiple", type=int, default=14)
 
     # Augmentation (MonST3R alignment)
     p.add_argument("--color_jitter", action="store_true",
                    help="Apply random ColorJitter (brightness/contrast/saturation/hue) per frame")
     p.add_argument("--aug_crop", type=int, default=0,
-                   help="Max pixels to randomly crop from image borders (MonST3R aug_crop style)")
+                   help="Max extra padding pixels for the dataset's crop-resize-to-fixed step "
+                        "(MonST3R aug_crop style; applied per-clip in the dataset)")
 
     p.add_argument("--train_last_n_blocks", type=int, default=8)
     p.add_argument("--conf_alpha", type=float, default=0.2)

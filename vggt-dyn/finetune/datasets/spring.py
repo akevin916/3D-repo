@@ -5,7 +5,7 @@ import h5py
 import numpy as np
 import torch
 
-from .common import center_crop_to_principal_point, load_rgb_np, sliding_windows
+from .common import crop_resize_to_fixed, load_rgb_np, make_clip_aug_params, sliding_windows
 
 SPRING_BASELINE = 0.065
 
@@ -25,8 +25,12 @@ class SpringClipDataset(torch.utils.data.Dataset):
         clip_len: int = 8,
         stride: int = 4,
         max_depth: float = 100.0,
+        target_hw: tuple = (294, 518),
+        aug_crop: int = 0,
     ):
         self.max_depth = max_depth
+        self.target_hw = target_hw
+        self.aug_crop = aug_crop
         self.samples: List[dict] = []
 
         base = os.path.join(root, split)
@@ -64,10 +68,11 @@ class SpringClipDataset(torch.utils.data.Dataset):
 
     def __getitem__(self, idx):
         s = self.samples[idx]
-        imgs_np, depths_np, Ks_np, Es = [], [], [], []
+        imgs, depths, Ks, Es = [], [], [], []
 
+        aug = make_clip_aug_params(self.aug_crop)
         for i in s["idxs"]:
-            imgs_np.append(load_rgb_np(os.path.join(s["rgb_dir"], s["rgbs"][i])))
+            img = load_rgb_np(os.path.join(s["rgb_dir"], s["rgbs"][i]))
 
             fx, fy, cx, cy = [float(x) for x in s["intr"][i]]
 
@@ -78,18 +83,15 @@ class SpringClipDataset(torch.utils.data.Dataset):
             depth = fx * SPRING_BASELINE / disp
             valid = np.isfinite(depth) & (depth > 0)
             depth = np.where(valid, np.clip(depth, 0, self.max_depth), 0.0).astype(np.float32)
-            depths_np.append(depth)
 
             K = np.array([[fx, 0.0, cx], [0.0, fy, cy], [0.0, 0.0, 1.0]], dtype=np.float32)
-            Ks_np.append(K)
+
+            img, depth, K = crop_resize_to_fixed(img, depth, K, self.target_hw, aug)
+
+            imgs.append(torch.from_numpy(img.transpose(2, 0, 1).copy()))
+            depths.append(torch.from_numpy(depth.copy()))
+            Ks.append(torch.from_numpy(K))
             Es.append(torch.from_numpy(s["ext"][i][:3, :]))
-
-        # Center crop around the principal point (MonST3R alignment).
-        imgs_np, depths_np, Ks_np = center_crop_to_principal_point(imgs_np, depths_np, Ks_np)
-
-        imgs = [torch.from_numpy(img.transpose(2, 0, 1)) for img in imgs_np]
-        depths = [torch.from_numpy(d) for d in depths_np]
-        Ks = [torch.from_numpy(K) for K in Ks_np]
 
         S, H, W = len(imgs), depths[0].shape[0], depths[0].shape[1]
         return {

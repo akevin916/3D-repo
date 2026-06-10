@@ -5,7 +5,14 @@ from typing import List
 import numpy as np
 import torch
 
-from .common import c2w_to_w2c, load_rgb, make_intrinsics, sliding_windows
+from .common import (
+    c2w_to_w2c,
+    crop_resize_to_fixed,
+    load_rgb_np,
+    make_clip_aug_params,
+    make_intrinsics,
+    sliding_windows,
+)
 
 
 def tartan_pose_to_c2w(xyzqxqyqzqw: np.ndarray) -> np.ndarray:
@@ -34,8 +41,12 @@ class TartanAirClipDataset(torch.utils.data.Dataset):
         clip_len: int = 8,
         stride: int = 4,
         max_depth: float = 200.0,
+        target_hw: tuple = (392, 518),
+        aug_crop: int = 0,
     ):
         self.max_depth = max_depth
+        self.target_hw = target_hw
+        self.aug_crop = aug_crop
         self.samples: List[dict] = []
         base = os.path.join(root, split)
         intrinsics = make_intrinsics(320.0, 320.0, 320.0, 240.0)
@@ -71,14 +82,20 @@ class TartanAirClipDataset(torch.utils.data.Dataset):
     def __getitem__(self, idx):
         s = self.samples[idx]
         imgs, depths, Ks, Es = [], [], [], []
+        aug = make_clip_aug_params(self.aug_crop)
         for i in s["idxs"]:
-            imgs.append(load_rgb(os.path.join(s["rgb_dir"], s["rgbs"][i])))
+            img = load_rgb_np(os.path.join(s["rgb_dir"], s["rgbs"][i]))
             depth = np.load(os.path.join(s["dpt_dir"], s["dpts"][i])).astype(np.float32)
             depth = np.clip(depth, 0, self.max_depth)
-            depths.append(torch.from_numpy(depth))
+            K = s["intrinsics"].copy()
+
+            img, depth, K = crop_resize_to_fixed(img, depth, K, self.target_hw, aug)
+
+            imgs.append(torch.from_numpy(img.transpose(2, 0, 1).copy()))
+            depths.append(torch.from_numpy(depth.copy()))
             c2w = tartan_pose_to_c2w(s["poses"][i])
             Es.append(torch.from_numpy(c2w_to_w2c(c2w)))
-            Ks.append(torch.from_numpy(s["intrinsics"]))
+            Ks.append(torch.from_numpy(K))
 
         S, H, W = len(imgs), depths[0].shape[0], depths[0].shape[1]
         return {
