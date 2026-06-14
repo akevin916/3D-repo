@@ -3,7 +3,7 @@
 **VGGT-Dyn** 是一個針對動態場景的幾何重建後處理 pipeline。
 以 VGGT 的 feed-forward 輸出作為高品質初始值，取代 MonST3R global optimization 的 MST 初始化，並引入 optical flow consistency loss 對靜態區域施加物理約束，從而在不重新訓練任何模型的條件下強化動態影像的深度與相機姿態品質。
 
-> **注意**：本 README 已隨 2026-06 重構更新。舊版批次腳本（`depth_batch.py`、`kitti_batch.py`、`sintel_pose_batch.py`、`vggt_single_frame_batch.py`）已整合為 `scripts/batch.py`，舊版 `sintel_pose_eval.py` / `inspect_components.py` 亦已移至對應子目錄。
+> **注意**：本 README 已隨 2026-06 重構更新。舊版批次腳本（`depth_batch.py`、`kitti_batch.py`、`sintel_pose_batch.py`、`vggt_single_frame_batch.py`）已整合為 `scripts/batch.py`，舊版 `sintel_pose_eval.py` 亦已移至對應子目錄；`inspect_components.py` 已整合進 `visualize.py` 並刪除。
 
 ---
 
@@ -125,8 +125,7 @@ vggt-dyn/
 ├── scripts/                      # 批次執行 & 工具腳本
 │   ├── batch.py                  # 統一批次執行器（depth / pose / single_frame）
 │   ├── vggt_baseline.py          # 原生 VGGT 無 TTO 推理（baseline）
-│   ├── inspect.py                # 元件診斷視覺化
-│   ├── visualize.py              # 深度 / 遮罩並排影片
+│   ├── visualize.py              # 診斷 GIF（RGB/Depth/Mask/Conf/RAFT-flow/Ego-flow）
 │   └── collect_eval_sum.py       # 匯整評估 JSON 至 eval_sum/
 │
 └── third_party/
@@ -258,26 +257,25 @@ python scripts/batch.py single_frame --dataset bonn|sintel|kitti ...  # VGGT bas
 
 常用選項：`--full_seq`、`--sequences a,b,c`、`--loss_version mon|dyn`、`--skip_existing`、`--dry_run`
 
-### 3) 元件診斷
+### 3) 視覺化診斷
 
 ```bash
-# flow / residual / mask 視覺化診斷
-python scripts/inspect.py \
-  --images "path/to/frames/*.png" \
-  --from_run outputs/my_scene \
-  --raft ../Endo3R/checkpoints/raft-things.pth \
-  --save_dir outputs/inspect_my_scene --gif
+# 基本：RGB / Depth / Dynamic Mask / Conf（4-panel GIF + stats.json）
+# --images 可省略，會自動讀取 metrics.json 內的 image_paths
+python scripts/visualize.py --output_dir outputs/my_scene
 
-# 深度 / 遮罩並排影片
+# 含 RAFT flow / ego-flow（6-panel，並重算 dynamic mask 做一致性比對）
 python scripts/visualize.py \
   --output_dir outputs/my_scene \
-  --images "path/to/frames/*.png" --fps 10
+  --raft ../Endo3R/checkpoints/raft-things.pth
 ```
+
+輸出：`<output_dir>/viz.gif`、`<output_dir>/stats.json`（含每幀 dyn%、conf 範圍，給 `--raft` 時還有 raft/ego flow 量值與 residual 統計）。
 
 ### 4) 建議的最小實驗流程
 
 1. `--max_frames 20` 小規模重建，確認不 OOM
-2. `scripts/inspect.py` 確認 flow / residual / mask 合理
+2. `scripts/visualize.py --raft ...` 確認 flow / residual / mask / conf 合理
 3. 完整序列 + `eval.py` / `scripts/batch.py` 產生最終指標
 4. `scripts/collect_eval_sum.py` 匯整多次實驗 JSON 至 `outputs/eval_sum/`
 
@@ -303,10 +301,10 @@ OPENCV_IO_ENABLE_OPENEXR=1 python finetune/train.py \
   --mix_datasets point_odyssey,tartanair,spring,waymo \
   --mix_weights 10000,5000,1000,4000 \
   --mix_roots point_odyssey=../data/point_odyssey,tartanair=../data/tartanair,spring=../data/spring,waymo=../data/waymo_processed \
-  --mix_samples_per_epoch 20000 \
+  --mix_samples_per_epoch 2000 \
   --ckpt ./finetune/checkpoints/VGGT-1B.pt \
   --output finetune_outputs/mix_freeze \
-  --epochs 10 --train_last_n_blocks 0 --clip_len 2 --amp
+  --epochs 10 --train_last_n_blocks 4 --clip_len 4 --amp
 ```
 
 ---

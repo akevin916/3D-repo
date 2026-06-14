@@ -79,6 +79,14 @@ def parse_args():
     p.add_argument("--mask_refresh",   type=int,   default=10,   help="refresh dynamic mask every N iters")
     p.add_argument("--mask_threshold", type=float, default=0.35, help="normalized flow-residual threshold")
 
+    # Intermediate evaluation
+    p.add_argument("--eval_every", type=int, default=0,
+                   help="if >0, save extrinsics/depth checkpoints every N iters "
+                        "to <output>/checkpoints/iter_XXXX/ for intermediate eval")
+
+    p.add_argument("--freeze_pose", action="store_true",
+                   help="freeze delta_rotvec/delta_t (pose not optimized; depth-only TTO)")
+
     # Misc
     p.add_argument("--device",  default="cuda")
     p.add_argument("--verbose", action="store_true")

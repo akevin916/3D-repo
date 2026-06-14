@@ -94,6 +94,7 @@ class VGGTDynOptimizer(nn.Module):
         dyn_pointmap_weight: float = 1.0,
         track_smooth_weight: float = 0.1,
         loss_version: str          = "mon",
+        freeze_pose: bool          = False,
     ):
         super().__init__()
 
@@ -104,8 +105,8 @@ class VGGTDynOptimizer(nn.Module):
 
         # ---- optimization variables (initialized to zero = identity delta) ----
         self.delta_depth   = nn.Parameter(torch.zeros(S, H * W))  # log-space
-        self.delta_rotvec  = nn.Parameter(torch.zeros(S, 3))      # axis-angle
-        self.delta_t       = nn.Parameter(torch.zeros(S, 3))
+        self.delta_rotvec  = nn.Parameter(torch.zeros(S, 3), requires_grad=not freeze_pose)  # axis-angle
+        self.delta_t       = nn.Parameter(torch.zeros(S, 3), requires_grad=not freeze_pose)
 
         # ---- frozen VGGT initialization (buffers, not parameters) ----
         self.register_buffer("init_depth",   init.depth)       # [S, H, W]
@@ -214,14 +215,19 @@ class VGGTDynOptimizer(nn.Module):
         K     = self.K[:-1]                            # [S-1, 3, 3]
         K_inv = torch.linalg.inv(K)                    # [S-1, 3, 3]
 
+        # R, T are cam-from-world (X_cam = R @ X_world + T); DepthBasedWarping
+        # expects cam-to-world (X_world = R_c2w @ X_cam + t_c2w).
+        R_c2w = R.transpose(-1, -2)                          # [S, 3, 3]
+        t_c2w = -(R_c2w @ T.unsqueeze(-1))                   # [S, 3, 1]
+
         # DepthBasedWarping signature:
         # forward(src_R, src_t, tgt_R, tgt_t, src_disp, K, inv_K, use_depth=False)
         # src_t / tgt_t must be [..., 3, 1] (column vectors)
         ego_hom, _ = self._depth_warping(
-            R[:-1],                    # [S-1, 3, 3]
-            T[:-1].unsqueeze(-1),      # [S-1, 3, 1]
-            R[1:],                     # [S-1, 3, 3]
-            T[1:].unsqueeze(-1),       # [S-1, 3, 1]
+            R_c2w[:-1],                # [S-1, 3, 3]
+            t_c2w[:-1],                # [S-1, 3, 1]
+            R_c2w[1:],                 # [S-1, 3, 3]
+            t_c2w[1:],                 # [S-1, 3, 1]
             depth[:-1].unsqueeze(1),   # [S-1, 1, H, W]
             K,                         # [S-1, 3, 3]
             K_inv,                     # [S-1, 3, 3]
