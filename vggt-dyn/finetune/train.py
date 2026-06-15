@@ -41,6 +41,7 @@ from finetune.model_utils import (
     apply_monst3r_style_freeze,
     cosine_lr,
     save_checkpoint,
+    amp_dtype_from_args,
 )
 
 
@@ -88,7 +89,7 @@ def _setup_optimizer(trainable_params, args: argparse.Namespace, resume_state):
         betas=(0.9, 0.95),
         weight_decay=args.weight_decay,
     )
-    scaler = torch.cuda.amp.GradScaler(enabled=args.amp)
+    scaler = torch.cuda.amp.GradScaler(enabled=args.amp and args.amp_dtype == "float16")
 
     if resume_state is not None:
         if "optimizer" in resume_state:
@@ -132,6 +133,8 @@ def _run_epoch(model, loader, optimizer, scaler, trainable_params, args, device,
     model.train()
     losses = []
 
+    amp_dtype = amp_dtype_from_args(args)
+
     color_jitter = None
     if args.color_jitter:
         from torchvision.transforms import ColorJitter
@@ -147,16 +150,17 @@ def _run_epoch(model, loader, optimizer, scaler, trainable_params, args, device,
         if color_jitter is not None:
             images = torch.stack([color_jitter(img) for img in images])
 
-        lr = cosine_lr(args.lr, args.min_lr, global_step, total_steps)
+        lr = cosine_lr(args.lr, args.min_lr, global_step, total_steps, warmup_ratio=args.warmup_ratio)
         for pg in optimizer.param_groups:
             pg["lr"] = lr
 
         optimizer.zero_grad(set_to_none=True)
-        with torch.cuda.amp.autocast(enabled=args.amp):
+        with torch.cuda.amp.autocast(enabled=args.amp, dtype=amp_dtype):
             preds = model(images)
             total_loss, info = monst3r_style_loss(
                 preds, depths, extrinsics, intrinsics,
                 conf_alpha=args.conf_alpha, camera_weight=args.camera_weight,
+                valid_range=args.valid_range,
             )
 
         if not torch.isfinite(total_loss):
@@ -373,11 +377,14 @@ def parse_args() -> argparse.Namespace:
     g_train.add_argument("--train_last_n_blocks", type=int, default=8)
     g_train.add_argument("--conf_alpha", type=float, default=0.2)
     g_train.add_argument("--camera_weight", type=float, default=0.5)
+    g_train.add_argument("--valid_range", type=float, default=0.98,
+                          help="Quantile threshold for outlier-pixel filtering in regression loss")
     g_train.add_argument("--epochs", type=int, default=10, help="Training epochs (additional epochs when --resume is set)")
     g_train.add_argument("--lr", type=float, default=5e-5)
     g_train.add_argument("--min_lr", type=float, default=1e-6)
     g_train.add_argument("--weight_decay", type=float, default=0.05)
     g_train.add_argument("--grad_clip", type=float, default=1.0)
+    g_train.add_argument("--warmup_ratio", type=float, default=0.05, help="Fraction of total steps for linear LR warmup")
     g_train.add_argument("--seed", type=int, default=42, help="Random seed for python/numpy/torch")
 
     g_val = p.add_argument_group("Validation (MonST3R-style: PointOdyssey test split + Sintel 'final')")
@@ -390,6 +397,8 @@ def parse_args() -> argparse.Namespace:
     g_run.add_argument("--workers", type=int, default=4)
     g_run.add_argument("--device", default="cuda")
     g_run.add_argument("--amp", action="store_true")
+    g_run.add_argument("--amp_dtype", default="bfloat16", choices=["bfloat16", "float16"],
+                        help="Autocast dtype when --amp is set (bfloat16 needs no GradScaler)")
     g_run.add_argument("--log_every", type=int, default=10)
 
     args = p.parse_args()

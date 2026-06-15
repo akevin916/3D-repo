@@ -67,7 +67,14 @@ def apply_monst3r_style_freeze(
     return trainable
 
 
-def cosine_lr(base_lr: float, min_lr: float, step: int, total_steps: int) -> float:
+def amp_dtype_from_args(args: argparse.Namespace) -> torch.dtype:
+    return torch.bfloat16 if args.amp_dtype == "bfloat16" else torch.float16
+
+
+def cosine_lr(base_lr: float, min_lr: float, step: int, total_steps: int, warmup_ratio: float = 0.05) -> float:
+    warmup_steps = int(total_steps * warmup_ratio)
+    if warmup_steps > 0 and step < warmup_steps:
+        return min_lr + (base_lr - min_lr) * (step / warmup_steps)
     t = step / max(1, total_steps - 1)
     return min_lr + (base_lr - min_lr) * (1.0 + math.cos(math.pi * t)) * 0.5
 

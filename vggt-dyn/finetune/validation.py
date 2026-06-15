@@ -13,6 +13,7 @@ from finetune.datasets import build_dataset
 from finetune.data_loader import _clone_args_for_dataset, _parse_kv_csv
 from finetune.losses import monst3r_style_loss
 from finetune.pose_metrics import w2c_to_c2w, pose_metrics
+from finetune.model_utils import amp_dtype_from_args
 
 log = logging.getLogger(__name__)
 
@@ -82,6 +83,7 @@ def validate(model: torch.nn.Module, val_loader, args: argparse.Namespace, devic
         return None
 
     model.eval()
+    amp_dtype = amp_dtype_from_args(args)
     agg: Dict[str, list] = {
         "loss_total": [], "loss_point": [], "loss_depth": [], "loss_camera": [],
         "abs_rel": [], "rmse": [], "d1": [],
@@ -94,11 +96,12 @@ def validate(model: torch.nn.Module, val_loader, args: argparse.Namespace, devic
         extrinsics = batch["extrinsics"].squeeze(0).to(device)
         intrinsics = batch["intrinsics"].squeeze(0).to(device)
 
-        with torch.cuda.amp.autocast(enabled=args.amp):
+        with torch.cuda.amp.autocast(enabled=args.amp, dtype=amp_dtype):
             preds = model(images)
             _, info = monst3r_style_loss(
                 preds, depths, extrinsics, intrinsics,
                 conf_alpha=args.conf_alpha, camera_weight=args.camera_weight,
+                valid_range=args.valid_range,
             )
         for k in ("loss_total", "loss_point", "loss_depth", "loss_camera"):
             agg[k].append(info[k])

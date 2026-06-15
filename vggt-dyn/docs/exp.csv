@@ -1,0 +1,36 @@
+Video Depth Evaluation,,,,,
+Alignment,Category,Method,Sintel (Abs Rel ↓ / δ↑),Bonn (Abs Rel ↓ / δ↑),KITTI (Abs Rel ↓ / δ↑)
+"Per-sequence
+ scale & shift",Video depth,NVDS,0.408 / 48.3,0.167 / 76.6,0.253 / 58.8
+,,ChronoDepth,0.687 / 48.6,0.100 / 91.1,0.167 / 75.9
+,,DepthCrafter,0.292 / 69.7,0.075 / 97.1,0.110 / 88.1
+,Joint depth & pose,MonST3R,0.335 / 58.5,0.063 / 96.4,0.104 / 89.5
+,,VGGT-mon,0.228 / 68.4,0.049 / 97.4,0.082 / 94.4
+,,VGGT-dyn,0.227 / 68.4,0.049 / 97.4,0.082 / 94.4
+"Per-sequence
+ scale only",Joint depth & pose,MonST3R,0.345 / 56.2,0.065 / 96.3,0.106 / 89.3
+,,VGGT-mon,0.288 / 65.9,0.055 / 97.1,0.090 / 95.0
+,,VGGT-dyn,0.288 / 68.4,0.055 / 97.1,0.090 / 95.0
+,,,,,
+Single Frame Depth Evaluation,,,,,
+Method,Sintel (Abs Rel ↓ / δ↑),Bonn (Abs Rel ↓ / δ↑),KITTI (Abs Rel ↓ / δ↑),,
+DUSt3R,0.424 / 58.7,0.141 / 82.5,0.112 / 86.3,,
+MonST3R,0.345 / 56.5,0.076 / 93.9,0.101 /89.3,,
+VGGT,0.406 / 54.3,0.135 / 86.8,0.109 / 86.9,,
+VGGT-mon,0.242 / 70.7,0.056 / 97.0,0.070 / 95.1,,
+VGGT-dyn,0.242 / 70.8,0.057 / 97.0,0.070 / 95.0,,
+,,,,,
+Pose Evaluation,,,,,
+Category,Method,"Sintel 
+ (ATE / trans / rot)",TUM-dynamics (ATE / trans / rot),"ScanNet
+  (ATE / trans / rot)",
+Pose only,DROID-SLAM*,0.175 / 0.084 / 1.912,-,-,
+,DPVO*,0.115 / 0.072 / 1.975,-,-,
+,ParticleSfM,0.129 / 0.031 / 0.535,-,0.136 / 0.023 / 0.836,
+,LEAP-VO*,0.089 / 0.066 / 1.250,0.046 / 0.027 / 0.385,0.070 / 0.018 / 0.535,
+"Joint depth
+ & pose",Robust-CVD,0.360 / 0.154 / 3.443,0.189 / 0.071 / 3.681,0.227 / 0.064 / 7.374,
+,CasualSAM,0.141 / 0.035 / 0.615,0.045 / 0.020 / 0.841,0.158 / 0.034 / 1.618,
+,DUSt3R w/ mask,0.417 / 0.250 / 5.796,0.127 / 0.062 / 3.099,0.081 / 0.028 / 0.784,
+,MonST3R,0.108 / 0.042 / 0.732,0.074 / 0.019 / 0.905,0.068 / 0.017 / 0.545,
+,Vggt-dyn,0.281 / 0.150 / 2.429,,,
