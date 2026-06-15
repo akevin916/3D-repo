@@ -1,1 +1,3 @@
 data/
+vggt-dyn/finetune/checkpoints/*.pt
+vggt-dyn/vggt/checkpoints/*.pt

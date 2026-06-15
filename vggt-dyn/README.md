@@ -125,8 +125,8 @@ vggt-dyn/
 ├── scripts/                      # 批次執行 & 工具腳本
 │   ├── batch.py                  # 統一批次執行器（depth / pose / single_frame）
 │   ├── vggt_baseline.py          # 原生 VGGT 無 TTO 推理（baseline）
-│   ├── inspect.py                # 元件診斷視覺化
-│   ├── visualize.py              # 深度 / 遮罩並排影片
+│   ├── inspect_components.py     # 元件診斷視覺化
+│   ├── visualize.py              # 診斷 GIF（RGB/Depth/Mask/Conf/RAFT-flow/Ego-flow）
 │   └── collect_eval_sum.py       # 匯整評估 JSON 至 eval_sum/
 │
 └── third_party/
@@ -258,26 +258,32 @@ python scripts/batch.py single_frame --dataset bonn|sintel|kitti ...  # VGGT bas
 
 常用選項：`--full_seq`、`--sequences a,b,c`、`--loss_version mon|dyn`、`--skip_existing`、`--dry_run`
 
-### 3) 元件診斷
+### 3) 視覺化診斷
 
 ```bash
-# flow / residual / mask 視覺化診斷
-python scripts/inspect.py \
+# 元件診斷：flow / residual / mask 視覺化
+python scripts/inspect_components.py \
   --images "path/to/frames/*.png" \
   --from_run outputs/my_scene \
   --raft ../Endo3R/checkpoints/raft-things.pth \
   --save_dir outputs/inspect_my_scene --gif
 
-# 深度 / 遮罩並排影片
+# 基本：RGB / Depth / Dynamic Mask / Conf（4-panel GIF + stats.json）
+# --images 可省略，會自動讀取 metrics.json 內的 image_paths
+python scripts/visualize.py --output_dir outputs/my_scene
+
+# 含 RAFT flow / ego-flow（6-panel，並重算 dynamic mask 做一致性比對）
 python scripts/visualize.py \
   --output_dir outputs/my_scene \
-  --images "path/to/frames/*.png" --fps 10
+  --raft ../Endo3R/checkpoints/raft-things.pth
 ```
+
+輸出：`<output_dir>/viz.gif`、`<output_dir>/stats.json`（含每幀 dyn%、conf 範圍，給 `--raft` 時還有 raft/ego flow 量值與 residual 統計）。
 
 ### 4) 建議的最小實驗流程
 
 1. `--max_frames 20` 小規模重建，確認不 OOM
-2. `scripts/inspect.py` 確認 flow / residual / mask 合理
+2. `scripts/visualize.py --raft ...` 確認 flow / residual / mask / conf 合理
 3. 完整序列 + `eval.py` / `scripts/batch.py` 產生最終指標
 4. `scripts/collect_eval_sum.py` 匯整多次實驗 JSON 至 `outputs/eval_sum/`
 

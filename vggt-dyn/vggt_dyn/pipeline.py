@@ -189,11 +189,14 @@ def _crop_depth_to_orig(depth_hw: np.ndarray,
 
 def save_outputs(output_dir: str, pts3d, depth, extrinsics, intrinsics,
                  dynamic_mask_per_frame, metrics: dict,
-                 original_coords=None, preprocess: str = "letterbox"):
+                 original_coords=None, preprocess: str = "letterbox",
+                 depth_conf=None):
     """Save all refined outputs to disk."""
     os.makedirs(output_dir, exist_ok=True)
     os.makedirs(os.path.join(output_dir, "depth"), exist_ok=True)
     os.makedirs(os.path.join(output_dir, "dynamic_mask"), exist_ok=True)
+    if depth_conf is not None:
+        os.makedirs(os.path.join(output_dir, "depth_conf"), exist_ok=True)
 
     np.save(os.path.join(output_dir, "pts3d.npy"),       pts3d.cpu().numpy())
     np.save(os.path.join(output_dir, "extrinsics.npy"),  extrinsics.cpu().numpy())
@@ -201,6 +204,7 @@ def save_outputs(output_dir: str, pts3d, depth, extrinsics, intrinsics,
 
     depth_np = depth.cpu().numpy()
     mask_np  = dynamic_mask_per_frame.cpu().numpy()
+    conf_np  = depth_conf.cpu().numpy() if depth_conf is not None else None
 
     coords_np = None
     if original_coords is not None:
@@ -213,6 +217,8 @@ def save_outputs(output_dir: str, pts3d, depth, extrinsics, intrinsics,
     for i in range(S):
         np.save(os.path.join(output_dir, "depth",        f"{i:04d}.npy"), depth_np[i])
         np.save(os.path.join(output_dir, "dynamic_mask", f"{i:04d}.npy"), mask_np[i, 0])
+        if conf_np is not None:
+            np.save(os.path.join(output_dir, "depth_conf", f"{i:04d}.npy"), conf_np[i])
         if coords_np is not None:
             d_orig = _crop_depth_to_orig(depth_np[i], coords_np[i], mode=preprocess)
             np.save(os.path.join(output_dir, "depth_orig_res", f"{i:04d}.npy"), d_orig)
@@ -294,13 +300,46 @@ def run_pipeline(args):
         dyn_pointmap_weight = args.dyn_pointmap_weight,
         track_smooth_weight = args.track_smooth_weight,
         loss_version        = args.loss_version,
+        freeze_pose         = args.freeze_pose,
     ).to(device)
+
+    # ── pre-optimization (raw VGGT) extrinsics & conf stats, for diagnostics ──
+    init_extrinsics = torch.cat([init.R, init.T.unsqueeze(-1)], dim=-1)  # [S, 3, 4]
+    conf_np  = init.anchor_conf.detach().cpu().numpy()
+    conf_hist, conf_bin_edges = np.histogram(conf_np, bins=10)
+    conf_stats = {
+        "min":  float(conf_np.min()),
+        "max":  float(conf_np.max()),
+        "mean": float(conf_np.mean()),
+        "std":  float(conf_np.std()),
+        "histogram":  conf_hist.tolist(),
+        "bin_edges":  conf_bin_edges.tolist(),
+    }
 
     adam = torch.optim.Adam(net.parameters(), lr=args.lr)
 
     # ── 5. Optimization loop ──────────────────────────────────────────────────
     print(f"[vggt-dyn] optimising {args.niter} iters (loss={args.loss_version}) ...")
     loss_history = []
+    eval_every = getattr(args, "eval_every", 0)
+    if eval_every > 0:
+        os.makedirs(os.path.join(args.output, "checkpoints"), exist_ok=True)
+        # iter_0000: pre-optimization (raw VGGT) state, for before/after comparison
+        ckpt_dir = os.path.join(args.output, "checkpoints", "iter_0000")
+        os.makedirs(ckpt_dir, exist_ok=True)
+        with torch.no_grad():
+            np.save(os.path.join(ckpt_dir, "extrinsics.npy"), net.get_extrinsics().cpu().numpy())
+            np.save(os.path.join(ckpt_dir, "intrinsics.npy"), net.get_K().cpu().numpy())
+            depth_ckpt = net.get_depth().cpu().numpy()
+            os.makedirs(os.path.join(ckpt_dir, "depth"), exist_ok=True)
+            for i in range(depth_ckpt.shape[0]):
+                np.save(os.path.join(ckpt_dir, "depth", f"{i:04d}.npy"), depth_ckpt[i])
+            frame_mask_ckpt = pair_mask_to_frame_mask(net.dynamic_mask, S).cpu().numpy()
+            os.makedirs(os.path.join(ckpt_dir, "dynamic_mask"), exist_ok=True)
+            for i in range(frame_mask_ckpt.shape[0]):
+                np.save(os.path.join(ckpt_dir, "dynamic_mask", f"{i:04d}.npy"), frame_mask_ckpt[i])
+        with open(os.path.join(ckpt_dir, "metrics.json"), "w") as f:
+            json.dump({"iter": 0, "loss": None}, f, indent=2)
 
     for it in range(args.niter):
         total_loss, flow_loss, lr = optimization_step(
@@ -319,6 +358,23 @@ def run_pipeline(args):
             print(f"  iter {it:3d}/{args.niter}  loss={total_loss:.4f}  "
                   f"{sec_name}={flow_loss:.4f}  lr={lr:.2e}")
 
+        if eval_every > 0 and ((it + 1) % eval_every == 0 or it == args.niter - 1):
+            ckpt_dir = os.path.join(args.output, "checkpoints", f"iter_{it+1:04d}")
+            os.makedirs(ckpt_dir, exist_ok=True)
+            with torch.no_grad():
+                np.save(os.path.join(ckpt_dir, "extrinsics.npy"), net.get_extrinsics().cpu().numpy())
+                np.save(os.path.join(ckpt_dir, "intrinsics.npy"), net.get_K().cpu().numpy())
+                depth_ckpt = net.get_depth().cpu().numpy()
+                os.makedirs(os.path.join(ckpt_dir, "depth"), exist_ok=True)
+                for i in range(depth_ckpt.shape[0]):
+                    np.save(os.path.join(ckpt_dir, "depth", f"{i:04d}.npy"), depth_ckpt[i])
+                frame_mask_ckpt = pair_mask_to_frame_mask(net.dynamic_mask, S).cpu().numpy()
+                os.makedirs(os.path.join(ckpt_dir, "dynamic_mask"), exist_ok=True)
+                for i in range(frame_mask_ckpt.shape[0]):
+                    np.save(os.path.join(ckpt_dir, "dynamic_mask", f"{i:04d}.npy"), frame_mask_ckpt[i])
+            with open(os.path.join(ckpt_dir, "metrics.json"), "w") as f:
+                json.dump({"iter": it + 1, "loss": float(total_loss)}, f, indent=2)
+
     print(f"[vggt-dyn] final loss: {loss_history[-1]:.4f} (was {loss_history[0]:.4f})")
 
     # ── 6. Extract and save results ───────────────────────────────────────────
@@ -336,10 +392,16 @@ def run_pipeline(args):
         "loss_final":   loss_history[-1],
         "loss_history": loss_history,
         "preprocess":   _preprocess,
+        "anchor_conf_stats": conf_stats,
+        "freeze_pose":  args.freeze_pose,
+        "images_glob":  args.images,
+        "image_paths":  [os.path.relpath(p, args.output) for p in image_paths],
     }
 
     save_outputs(
         args.output,
         pts3d, depth, extrinsics, intrinsics, frame_mask, metrics,
         original_coords=original_coords, preprocess=_preprocess,
+        depth_conf=init.depth_conf,
     )
+    np.save(os.path.join(args.output, "init_extrinsics.npy"), init_extrinsics.cpu().numpy())

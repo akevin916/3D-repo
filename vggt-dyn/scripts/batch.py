@@ -675,9 +675,7 @@ def parse_args():
     pp.add_argument("--output_root", default=None)
     _add_batch_opts(pp)
     _add_run_opts(pp)
-    pp.add_argument("--preprocess", choices=["letterbox", "center_crop", "long_edge"],
-                    default="center_crop")  # override default for pose
-    pp.add_argument("--niter", type=int, default=300)
+    pp.set_defaults(preprocess="center_crop", niter=300)  # override defaults for pose
     pp.add_argument("--pose_eval_stride", type=int, default=1)
 
     # ── single_frame ──────────────────────────────────────────────────────────
@@ -694,7 +692,6 @@ def parse_args():
     sf.add_argument("--max_frames", type=int, default=None)
     sf.add_argument("--save_conf",  action="store_true")
     _add_depth_eval_opts(sf)
-    sf.add_argument("--use_eigen_crop", action="store_true")
 
     return top.parse_args()
 

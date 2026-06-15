@@ -68,12 +68,17 @@ def compute_ego_flow(
     K_src = K[:-1]                     # [S-1, 3, 3]
     K_inv = torch.linalg.inv(K_src)    # [S-1, 3, 3]
 
+    # R, T are cam-from-world (X_cam = R @ X_world + T); DepthBasedWarping
+    # expects cam-to-world (X_world = R_c2w @ X_cam + t_c2w).
+    R_c2w = R.transpose(-1, -2)              # [S, 3, 3]
+    t_c2w = -(R_c2w @ T.unsqueeze(-1))       # [S, 3, 1]
+
     # DepthBasedWarping expects src_t / tgt_t as column vectors [B, 3, 1]
     ego_hom, _ = warper(
-        R[:-1],                        # src_R  [S-1, 3, 3]
-        T[:-1].unsqueeze(-1),          # src_t  [S-1, 3, 1]
-        R[1:],                         # tgt_R  [S-1, 3, 3]
-        T[1:].unsqueeze(-1),           # tgt_t  [S-1, 3, 1]
+        R_c2w[:-1],                    # src_R  [S-1, 3, 3]
+        t_c2w[:-1],                    # src_t  [S-1, 3, 1]
+        R_c2w[1:],                     # tgt_R  [S-1, 3, 3]
+        t_c2w[1:],                     # tgt_t  [S-1, 3, 1]
         depth[:-1].unsqueeze(1),       # src_depth [S-1, 1, H, W]
         K_src,
         K_inv,
