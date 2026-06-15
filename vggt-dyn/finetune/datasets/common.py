@@ -15,6 +15,7 @@ DATASET_TARGET_HW = {
     "spring":        (294, 518),  # ~16:9 (matches 1920x1080)
     "tartanair":     (392, 518),  # ~4:3  (matches 640x480)
     "waymo":         (392, 518),  # ~1.5  (matches 512x341, closer to 4:3 than 16:9)
+    "sintel":        (224, 518),  # ~2.35:1 (matches 1024x436)
 }
 
 

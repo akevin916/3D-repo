@@ -5,6 +5,7 @@ from .point_odyssey import PointOdysseyClipDataset
 from .tartanair import TartanAirClipDataset
 from .waymo import WaymoClipDataset
 from .spring import SpringClipDataset
+from .sintel import SintelClipDataset
 
 
 def build_dataset(args):
@@ -44,6 +45,16 @@ def build_dataset(args):
         )
     if name == "spring":
         return SpringClipDataset(
+            root=args.root,
+            split=args.split,
+            clip_len=args.clip_len,
+            stride=args.stride,
+            max_depth=args.max_depth,
+            target_hw=target_hw,
+            aug_crop=aug_crop,
+        )
+    if name == "sintel":
+        return SintelClipDataset(
             root=args.root,
             split=args.split,
             clip_len=args.clip_len,
