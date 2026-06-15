@@ -23,7 +23,7 @@ def apply_monst3r_style_freeze(
     model: torch.nn.Module,
     train_last_n_blocks: int = 8,
     unfreeze_heads: bool = True,
-) -> list:
+) -> dict:
     """Freeze backbone like MonST3R and train a small subset.
 
     MonST3R uses freeze='encoder'. VGGT has no explicit decoder split,
@@ -31,11 +31,20 @@ def apply_monst3r_style_freeze(
     1) freeze everything,
     2) unfreeze last N frame/global blocks,
     3) unfreeze output heads.
+
+    Returns a dict mapping group name -> list of trainable parameters,
+    with keys "backbone", "depth_head", "point_head", "camera_head"
+    (a key is omitted if its group has no trainable parameters). This
+    grouping is used both for per-module gradient clipping and for
+    assigning a separate LR to backbone vs. heads.
     """
     for p in model.parameters():
         p.requires_grad_(False)
 
+    param_groups: dict = {}
+
     agg = model.aggregator
+    backbone_params = []
     if train_last_n_blocks > 0:
         n_frame = len(agg.frame_blocks)
         n_global = len(agg.global_blocks)
@@ -43,28 +52,37 @@ def apply_monst3r_style_freeze(
         for blk in agg.frame_blocks[-n:]:
             for p in blk.parameters():
                 p.requires_grad_(True)
+                backbone_params.append(p)
         for blk in agg.global_blocks[-n:]:
             for p in blk.parameters():
                 p.requires_grad_(True)
+                backbone_params.append(p)
+    if backbone_params:
+        param_groups["backbone"] = backbone_params
 
     if unfreeze_heads:
         for name in ("depth_head", "point_head", "camera_head"):
             head = getattr(model, name, None)
             if head is not None:
+                head_params = []
                 for p in head.parameters():
                     p.requires_grad_(True)
+                    head_params.append(p)
+                if head_params:
+                    param_groups[name] = head_params
 
-    trainable = [p for p in model.parameters() if p.requires_grad]
+    trainable = [p for group in param_groups.values() for p in group]
     n_trainable = sum(p.numel() for p in trainable)
     n_total = sum(p.numel() for p in model.parameters())
     log.info(
-        "[Freeze] trainable=%s / %s (%.2f%%), last_n_blocks=%d",
+        "[Freeze] trainable=%s / %s (%.2f%%), last_n_blocks=%d, groups=%s",
         f"{n_trainable:,}",
         f"{n_total:,}",
         (100.0 * n_trainable / max(1, n_total)),
         train_last_n_blocks,
+        {k: len(v) for k, v in param_groups.items()},
     )
-    return trainable
+    return param_groups
 
 
 def amp_dtype_from_args(args: argparse.Namespace) -> torch.dtype:

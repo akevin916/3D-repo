@@ -73,19 +73,30 @@ def _build_model(args: argparse.Namespace, device: torch.device):
         model.load_state_dict(state)
     model.to(device)
 
-    trainable_params = apply_monst3r_style_freeze(
+    param_groups = apply_monst3r_style_freeze(
         model,
         train_last_n_blocks=args.train_last_n_blocks,
         unfreeze_heads=True,
     )
-    return model, trainable_params, resume_state
+    return model, param_groups, resume_state
 
 
-def _setup_optimizer(trainable_params, args: argparse.Namespace, resume_state):
-    """Build optimizer/scaler and resolve epoch/step bookkeeping (incl. resume)."""
+def _setup_optimizer(param_groups: dict, args: argparse.Namespace, resume_state):
+    """Build optimizer/scaler and resolve epoch/step bookkeeping (incl. resume).
+
+    Two LR groups: backbone (last-N blocks) uses --lr, heads use --lr_heads.
+    """
+    backbone_params = param_groups.get("backbone", [])
+    head_params = [p for name, group in param_groups.items() if name != "backbone" for p in group]
+
+    optimizer_param_groups = []
+    if backbone_params:
+        optimizer_param_groups.append({"params": backbone_params, "lr": args.lr, "name": "backbone"})
+    if head_params:
+        optimizer_param_groups.append({"params": head_params, "lr": args.lr_heads, "name": "heads"})
+
     optimizer = torch.optim.AdamW(
-        trainable_params,
-        lr=args.lr,
+        optimizer_param_groups,
         betas=(0.9, 0.95),
         weight_decay=args.weight_decay,
     )
@@ -127,13 +138,17 @@ def _load_history(args: argparse.Namespace) -> list:
     return []
 
 
-def _run_epoch(model, loader, optimizer, scaler, trainable_params, args, device,
+def _run_epoch(model, loader, optimizer, scaler, param_groups, args, device,
                epoch, end_epoch, global_step, total_steps, writer, history):
     """Run one training epoch over `loader`. Returns (epoch_loss, global_step)."""
     model.train()
     losses = []
 
     amp_dtype = amp_dtype_from_args(args)
+
+    # Base LR of each optimizer param group (backbone vs heads), so the
+    # cosine/warmup schedule scales both groups while preserving their ratio.
+    base_lrs = [pg["lr"] for pg in optimizer.param_groups]
 
     color_jitter = None
     if args.color_jitter:
@@ -151,15 +166,21 @@ def _run_epoch(model, loader, optimizer, scaler, trainable_params, args, device,
             images = torch.stack([color_jitter(img) for img in images])
 
         lr = cosine_lr(args.lr, args.min_lr, global_step, total_steps, warmup_ratio=args.warmup_ratio)
-        for pg in optimizer.param_groups:
-            pg["lr"] = lr
+        lr_scale = lr / args.lr
+        for pg, base_lr in zip(optimizer.param_groups, base_lrs):
+            pg["lr"] = base_lr * lr_scale
 
         optimizer.zero_grad(set_to_none=True)
         with torch.cuda.amp.autocast(enabled=args.amp, dtype=amp_dtype):
             preds = model(images)
             total_loss, info = monst3r_style_loss(
                 preds, depths, extrinsics, intrinsics,
-                conf_alpha=args.conf_alpha, camera_weight=args.camera_weight,
+                conf_alpha_point=args.conf_alpha_point, conf_alpha_depth=args.conf_alpha_depth,
+                point_weight=args.point_weight, depth_weight=args.depth_weight,
+                camera_weight=args.camera_weight,
+                camera_gamma=args.camera_gamma,
+                weight_trans=args.weight_trans, weight_rot=args.weight_rot, weight_focal=args.weight_focal,
+                gradient_loss_weight=args.gradient_loss_weight,
                 valid_range=args.valid_range,
             )
 
@@ -173,7 +194,12 @@ def _run_epoch(model, loader, optimizer, scaler, trainable_params, args, device,
 
         scaler.scale(total_loss).backward()
         scaler.unscale_(optimizer)
-        torch.nn.utils.clip_grad_norm_(trainable_params, args.grad_clip)
+        # Per-module gradient clipping: clip each group (backbone / depth_head /
+        # point_head / camera_head) independently so a large gradient in one
+        # task's head doesn't shrink the clip coefficient for the others.
+        for group in param_groups.values():
+            if group:
+                torch.nn.utils.clip_grad_norm_(group, args.grad_clip)
         scaler.step(optimizer)
         scaler.update()
 
@@ -186,6 +212,11 @@ def _run_epoch(model, loader, optimizer, scaler, trainable_params, args, device,
         writer.add_scalar("train/loss_point", info["loss_point"], global_step)
         writer.add_scalar("train/loss_depth", info["loss_depth"], global_step)
         writer.add_scalar("train/loss_camera", info["loss_camera"], global_step)
+        writer.add_scalar("train/loss_T", info["loss_T"], global_step)
+        writer.add_scalar("train/loss_R", info["loss_R"], global_step)
+        writer.add_scalar("train/loss_FL", info["loss_FL"], global_step)
+        writer.add_scalar("train/loss_grad_point", info["loss_grad_point"], global_step)
+        writer.add_scalar("train/loss_grad_depth", info["loss_grad_depth"], global_step)
         writer.add_scalar("train/lr", lr, global_step)
 
         if global_step % args.log_every == 0:
@@ -271,13 +302,13 @@ def train(args: argparse.Namespace) -> None:
     writer = SummaryWriter(log_dir=tb_dir)
     log.info("TensorBoard enabled: %s", tb_dir)
 
-    model, trainable_params, resume_state = _build_model(args, device)
+    model, param_groups, resume_state = _build_model(args, device)
 
     loader = build_loader(args)
     val_loader = build_val_loader(args)
 
     optimizer, scaler, start_epoch, global_step, best_epoch_loss, end_epoch = _setup_optimizer(
-        trainable_params, args, resume_state
+        param_groups, args, resume_state
     )
     total_steps = max(1, args.epochs * len(loader))
     history = _load_history(args)
@@ -287,7 +318,7 @@ def train(args: argparse.Namespace) -> None:
         epoch_start = time.time()
 
         epoch_loss, global_step = _run_epoch(
-            model, loader, optimizer, scaler, trainable_params, args, device,
+            model, loader, optimizer, scaler, param_groups, args, device,
             epoch, end_epoch, global_step, total_steps, writer, history,
         )
 
@@ -375,12 +406,23 @@ def parse_args() -> argparse.Namespace:
 
     g_train = p.add_argument_group("Training / optimization")
     g_train.add_argument("--train_last_n_blocks", type=int, default=8)
-    g_train.add_argument("--conf_alpha", type=float, default=0.2)
+    g_train.add_argument("--conf_alpha_point", type=float, default=0.2, help="conf regularization weight for point loss")
+    g_train.add_argument("--conf_alpha_depth", type=float, default=0.2, help="conf regularization weight for depth loss")
+    g_train.add_argument("--point_weight", type=float, default=1.0, help="Overall weight for the point loss term")
+    g_train.add_argument("--depth_weight", type=float, default=1.0, help="Overall weight for the depth loss term")
     g_train.add_argument("--camera_weight", type=float, default=0.5)
+    g_train.add_argument("--camera_gamma", type=float, default=0.6,
+                          help="Temporal decay for multi-stage camera loss (gamma^(n_stages-stage-1))")
+    g_train.add_argument("--weight_trans", type=float, default=1.0, help="Camera loss weight for translation")
+    g_train.add_argument("--weight_rot", type=float, default=1.0, help="Camera loss weight for rotation")
+    g_train.add_argument("--weight_focal", type=float, default=0.5, help="Camera loss weight for focal/FoV")
+    g_train.add_argument("--gradient_loss_weight", type=float, default=0.0,
+                          help="Weight for spatial-gradient consistency loss on depth/point maps (0 = disabled)")
     g_train.add_argument("--valid_range", type=float, default=0.98,
                           help="Quantile threshold for outlier-pixel filtering in regression loss")
     g_train.add_argument("--epochs", type=int, default=10, help="Training epochs (additional epochs when --resume is set)")
-    g_train.add_argument("--lr", type=float, default=5e-5)
+    g_train.add_argument("--lr", type=float, default=5e-5, help="Backbone (last-N blocks) learning rate")
+    g_train.add_argument("--lr_heads", type=float, default=5e-5, help="Output heads (depth/point/camera) learning rate")
     g_train.add_argument("--min_lr", type=float, default=1e-6)
     g_train.add_argument("--weight_decay", type=float, default=0.05)
     g_train.add_argument("--grad_clip", type=float, default=1.0)

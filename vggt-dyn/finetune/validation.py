@@ -100,7 +100,12 @@ def validate(model: torch.nn.Module, val_loader, args: argparse.Namespace, devic
             preds = model(images)
             _, info = monst3r_style_loss(
                 preds, depths, extrinsics, intrinsics,
-                conf_alpha=args.conf_alpha, camera_weight=args.camera_weight,
+                conf_alpha_point=args.conf_alpha_point, conf_alpha_depth=args.conf_alpha_depth,
+                point_weight=args.point_weight, depth_weight=args.depth_weight,
+                camera_weight=args.camera_weight,
+                camera_gamma=args.camera_gamma,
+                weight_trans=args.weight_trans, weight_rot=args.weight_rot, weight_focal=args.weight_focal,
+                gradient_loss_weight=args.gradient_loss_weight,
                 valid_range=args.valid_range,
             )
         for k in ("loss_total", "loss_point", "loss_depth", "loss_camera"):

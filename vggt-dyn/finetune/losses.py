@@ -111,13 +111,124 @@ def _normalize_gt_to_cam0(
     return new_extrinsics, new_pts, new_depth, avg_scale
 
 
+def camera_loss_single(pred_pose_enc: torch.Tensor, gt_pose_enc: torch.Tensor) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Split L1 pose-encoding loss into translation / rotation(quat) / focal(FoV)
+    components, following VGGT's "absT_quaR_FoV" pose encoding layout."""
+    loss_T = (pred_pose_enc[..., :3] - gt_pose_enc[..., :3]).abs()
+    loss_R = (pred_pose_enc[..., 3:7] - gt_pose_enc[..., 3:7]).abs()
+    loss_FL = (pred_pose_enc[..., 7:] - gt_pose_enc[..., 7:]).abs()
+
+    loss_T = check_and_fix_inf_nan(loss_T).clamp(max=100).mean()
+    loss_R = check_and_fix_inf_nan(loss_R).mean()
+    loss_FL = check_and_fix_inf_nan(loss_FL).mean()
+    return loss_T, loss_R, loss_FL
+
+
+def _compute_camera_loss(
+    pose_enc_list,                 # list of [1, S, D] predicted pose encodings (one per stage)
+    gt_enc: torch.Tensor,          # [S, D]
+    valid_frame_mask: torch.Tensor,  # [S] bool
+    gamma: float = 0.6,
+    weight_trans: float = 1.0,
+    weight_rot: float = 1.0,
+    weight_focal: float = 0.5,
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+    """Multi-stage camera loss with temporal decay weighting (later stages
+    weighted more heavily) and separate T/R/FoV component weights."""
+    n_stages = len(pose_enc_list)
+    device = gt_enc.device
+
+    if valid_frame_mask.sum() == 0:
+        zero = (pose_enc_list[-1] * 0).mean()
+        return zero, zero, zero, zero
+
+    gt = gt_enc[valid_frame_mask]
+    total_T = total_R = total_FL = torch.tensor(0.0, device=device)
+    for stage_idx, pred_enc in enumerate(pose_enc_list):
+        stage_weight = gamma ** (n_stages - stage_idx - 1)
+        pred = pred_enc
+        if pred.dim() == 3:  # [1, S, D] -> [S, D]
+            pred = pred.squeeze(0)
+        loss_T, loss_R, loss_FL = camera_loss_single(pred[valid_frame_mask], gt)
+        total_T = total_T + loss_T * stage_weight
+        total_R = total_R + loss_R * stage_weight
+        total_FL = total_FL + loss_FL * stage_weight
+
+    avg_T = total_T / n_stages
+    avg_R = total_R / n_stages
+    avg_FL = total_FL / n_stages
+    loss_camera = avg_T * weight_trans + avg_R * weight_rot + avg_FL * weight_focal
+    return loss_camera, avg_T, avg_R, avg_FL
+
+
+def gradient_loss(
+    pred: torch.Tensor,    # [S, H, W, C]
+    gt: torch.Tensor,      # [S, H, W, C]
+    mask: torch.Tensor,    # [S, H, W] bool
+    conf: torch.Tensor = None,  # [S, H, W]
+    conf_alpha: float = 0.2,
+    scales: int = 3,
+) -> torch.Tensor:
+    """Multi-scale L1 loss between x/y spatial gradients of the (pred-gt)
+    error map (MonST3R-style "grad" loss) -- encourages locally consistent
+    structure rather than just per-pixel accuracy."""
+    device = pred.device
+    total = torch.tensor(0.0, device=device)
+    n_valid_scales = 0
+
+    for scale in range(scales):
+        step = 2 ** scale
+        p = pred[:, ::step, ::step]
+        g = gt[:, ::step, ::step]
+        m = mask[:, ::step, ::step]
+        c = conf[:, ::step, ::step] if conf is not None else None
+
+        if m.shape[1] < 2 or m.shape[2] < 2:
+            continue
+
+        diff = (p - g) * m[..., None]
+
+        grad_x = (diff[:, :, 1:] - diff[:, :, :-1]).abs().clamp(max=100)
+        mask_x = m[:, :, 1:] & m[:, :, :-1]
+        grad_x = grad_x * mask_x[..., None]
+
+        grad_y = (diff[:, 1:, :] - diff[:, :-1, :]).abs().clamp(max=100)
+        mask_y = m[:, 1:, :] & m[:, :-1, :]
+        grad_y = grad_y * mask_y[..., None]
+
+        if c is not None:
+            conf_x = c[:, :, 1:, None].clamp(min=1e-6)
+            conf_y = c[:, 1:, :, None].clamp(min=1e-6)
+            grad_x = (grad_x * conf_x - conf_alpha * conf_x.log()) * mask_x[..., None]
+            grad_y = (grad_y * conf_y - conf_alpha * conf_y.log()) * mask_y[..., None]
+
+        n_valid = mask_x.sum() + mask_y.sum()
+        if n_valid == 0:
+            continue
+
+        total = total + (grad_x.sum() + grad_y.sum()) / n_valid.clamp(min=1)
+        n_valid_scales += 1
+
+    if n_valid_scales == 0:
+        return torch.tensor(0.0, device=device)
+    return check_and_fix_inf_nan(total / n_valid_scales)
+
+
 def monst3r_style_loss(
     predictions: Dict[str, torch.Tensor],
     gt_depth: torch.Tensor,
     gt_extrinsics: torch.Tensor,
     gt_intrinsics: torch.Tensor,
-    conf_alpha: float,
-    camera_weight: float,
+    conf_alpha_point: float = 0.2,
+    conf_alpha_depth: float = 0.2,
+    point_weight: float = 1.0,
+    depth_weight: float = 1.0,
+    camera_weight: float = 0.5,
+    camera_gamma: float = 0.6,
+    weight_trans: float = 1.0,
+    weight_rot: float = 1.0,
+    weight_focal: float = 0.5,
+    gradient_loss_weight: float = 0.0,
     valid_range: float = 0.98,
 ) -> Tuple[torch.Tensor, Dict[str, float]]:
     """Conf-weighted regression inspired by MonST3R's ConfLoss(Regr3D)."""
@@ -141,12 +252,16 @@ def monst3r_style_loss(
     if pred_conf.dim() == 4:  # [1, S, H, W] -> [S, H, W]
         pred_conf = pred_conf.squeeze(0)
 
+    loss_grad_point = torch.tensor(0.0, device=device)
     if valid.sum() > 0:
         point_err = (pred_pts[valid] - gt_pts[valid]).norm(dim=-1)
         conf = pred_conf[valid]
-        point_loss_elems = point_err * conf - conf_alpha * conf.log()
+        point_loss_elems = point_err * conf - conf_alpha_point * conf.log()
         point_loss_elems = check_and_fix_inf_nan(point_loss_elems)
         loss_point = filter_by_quantile(point_loss_elems, valid_range).mean()
+
+        if gradient_loss_weight > 0:
+            loss_grad_point = gradient_loss(pred_pts, gt_pts, valid, conf=pred_conf, conf_alpha=conf_alpha_point)
     else:
         loss_point = torch.tensor(0.0, device=device)
 
@@ -156,29 +271,42 @@ def monst3r_style_loss(
         pred_depth = pred_depth.squeeze(0)
     if pred_depth_conf.dim() == 4:  # [1, S, H, W] -> [S, H, W]
         pred_depth_conf = pred_depth_conf.squeeze(0)
+
+    loss_grad_depth = torch.tensor(0.0, device=device)
     if valid.sum() > 0:
         depth_err = (pred_depth[valid] - gt_depth_n[valid]).abs()
         conf_d = pred_depth_conf[valid]
-        depth_loss_elems = depth_err * conf_d - conf_alpha * conf_d.log()
+        depth_loss_elems = depth_err * conf_d - conf_alpha_depth * conf_d.log()
         depth_loss_elems = check_and_fix_inf_nan(depth_loss_elems)
         loss_depth = filter_by_quantile(depth_loss_elems, valid_range).mean()
+
+        if gradient_loss_weight > 0:
+            loss_grad_depth = gradient_loss(
+                pred_depth.unsqueeze(-1), gt_depth_n.unsqueeze(-1), valid,
+                conf=pred_depth_conf, conf_alpha=conf_alpha_depth,
+            )
     else:
         loss_depth = torch.tensor(0.0, device=device)
 
-    loss_camera = torch.tensor(0.0, device=device)
+    loss_camera = avg_T = avg_R = avg_FL = torch.tensor(0.0, device=device)
     if "pose_enc_list" in predictions:
         gt_enc = extri_intri_to_pose_encoding(
             gt_extrinsics_n.unsqueeze(0),
             gt_intrinsics.unsqueeze(0),
             image_size_hw=(H, W),
         )
-        gt_enc = check_and_fix_inf_nan(gt_enc, hard_max=None)
-        for pred_enc in predictions["pose_enc_list"]:
-            loss_camera = loss_camera + (pred_enc - gt_enc).abs().mean()
-        loss_camera = loss_camera / len(predictions["pose_enc_list"])
+        gt_enc = check_and_fix_inf_nan(gt_enc, hard_max=None).squeeze(0)  # [S, D]
 
-    loss_point = check_and_fix_inf_nan(loss_point)
-    loss_depth = check_and_fix_inf_nan(loss_depth)
+        # Only supervise camera pose on frames with enough valid GT depth.
+        valid_frame_mask = valid.sum(dim=[-2, -1]) > 100
+
+        loss_camera, avg_T, avg_R, avg_FL = _compute_camera_loss(
+            predictions["pose_enc_list"], gt_enc, valid_frame_mask,
+            gamma=camera_gamma, weight_trans=weight_trans, weight_rot=weight_rot, weight_focal=weight_focal,
+        )
+
+    loss_point = check_and_fix_inf_nan(loss_point + gradient_loss_weight * loss_grad_point) * point_weight
+    loss_depth = check_and_fix_inf_nan(loss_depth + gradient_loss_weight * loss_grad_depth) * depth_weight
     loss_camera = check_and_fix_inf_nan(loss_camera)
 
     total = loss_point + loss_depth + camera_weight * loss_camera
@@ -188,4 +316,9 @@ def monst3r_style_loss(
         "loss_point": float(loss_point.detach().cpu()),
         "loss_depth": float(loss_depth.detach().cpu()),
         "loss_camera": float(loss_camera.detach().cpu()),
+        "loss_T": float(avg_T.detach().cpu()),
+        "loss_R": float(avg_R.detach().cpu()),
+        "loss_FL": float(avg_FL.detach().cpu()),
+        "loss_grad_point": float(loss_grad_point.detach().cpu()),
+        "loss_grad_depth": float(loss_grad_depth.detach().cpu()),
     }
