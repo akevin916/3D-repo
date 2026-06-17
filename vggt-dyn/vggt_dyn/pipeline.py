@@ -24,8 +24,9 @@ for _p in (_PROJECT_DIR, _VGGT_REPO):
         sys.path.insert(0, _p)
 
 from vggt_dyn.initializer import VGGTInitializer
+from vggt_dyn.losses import MonLoss, DynLoss
 from vggt_dyn.optimizer import VGGTDynOptimizer, optimization_step
-from vggt_dyn.dynamic_mask import get_dynamic_mask_from_optimizer, pair_mask_to_frame_mask
+from vggt_dyn.dynamic_mask import get_dynamic_mask_from_optimizer, pair_mask_to_frame_mask, frame_mask_to_pair_mask
 from vggt_dyn.utils.flow_utils import compute_adjacent_flow
 
 
@@ -187,6 +188,35 @@ def _crop_depth_to_orig(depth_hw: np.ndarray,
 # Output saving
 # ===========================================================================
 
+def _load_gt_pair_mask(
+    gt_mask_dir: str,
+    image_paths: list,
+    H: int,
+    W: int,
+    device: torch.device,
+) -> torch.Tensor:
+    """Load GT dynamic-mask PNGs and convert to per-pair bool tensor [S-1,1,H,W].
+
+    PNG basenames must match those in image_paths (e.g. frame_0001.png).
+    Missing files are treated as all-static (zeros).
+    """
+    from PIL import Image
+
+    S = len(image_paths)
+    frame_masks = []
+    for p in image_paths:
+        mask_path = os.path.join(gt_mask_dir, os.path.basename(p))
+        if os.path.isfile(mask_path):
+            m = Image.open(mask_path).convert("L").resize((W, H), Image.Resampling.NEAREST)
+            m_t = torch.from_numpy(np.array(m, dtype=np.float32) / 255.0) > 0.5  # [H, W]
+        else:
+            m_t = torch.zeros(H, W, dtype=torch.bool)
+        frame_masks.append(m_t.unsqueeze(0))  # [1, H, W]
+
+    frame_mask = torch.stack(frame_masks, dim=0).to(device)  # [S, 1, H, W]
+    return frame_mask_to_pair_mask(frame_mask)               # [S-1, 1, H, W]
+
+
 def save_outputs(output_dir: str, pts3d, depth, extrinsics, intrinsics,
                  dynamic_mask_per_frame, metrics: dict,
                  original_coords=None, preprocess: str = "letterbox",
@@ -291,16 +321,29 @@ def run_pipeline(args):
     flow_fwd  = flow_fwd.to(device)
     valid_fwd = valid_fwd.to(device)
 
+    if args.loss_version == "dyn":
+        loss_fn = DynLoss(
+            dyn_pointmap_weight = args.dyn_pointmap_weight,
+            track_smooth_weight = args.track_smooth_weight,
+        )
+    else:
+        loss_fn = MonLoss(
+            anchor_weight        = args.anchor_weight,
+            flow_weight          = args.flow_weight,
+            depth_reg_weight     = args.depth_reg_weight,
+            smooth_weight        = args.smooth_weight,
+            scale_flow_loss      = getattr(args, "scale_flow_loss", False),
+            translation_weight   = getattr(args, "translation_weight", 0.1),
+            niter                = args.niter,
+            flow_loss_start_frac = getattr(args, "flow_loss_start_frac", 0.15),
+            flow_loss_thre       = getattr(args, "flow_loss_thre", 50.0),
+            pxl_thre             = getattr(args, "pxl_thre", 50.0),
+        )
+
     net = VGGTDynOptimizer(
         init, flow_fwd, valid_fwd,
-        anchor_weight       = args.anchor_weight,
-        flow_weight         = args.flow_weight,
-        depth_reg_weight    = args.depth_reg_weight,
-        mon_smooth_weight   = args.mon_smooth_weight,
-        dyn_pointmap_weight = args.dyn_pointmap_weight,
-        track_smooth_weight = args.track_smooth_weight,
-        loss_version        = args.loss_version,
-        freeze_pose         = args.freeze_pose,
+        loss        = loss_fn,
+        freeze_pose = args.freeze_pose,
     ).to(device)
 
     # ── pre-optimization (raw VGGT) extrinsics & conf stats, for diagnostics ──
@@ -317,6 +360,17 @@ def run_pipeline(args):
     }
 
     adam = torch.optim.Adam(net.parameters(), lr=args.lr)
+
+    # ── GT mask injection (skips self-mask computation if provided) ───────────
+    gt_mask_dir = getattr(args, "gt_mask_dir", None)
+    if gt_mask_dir:
+        print(f"[vggt-dyn] loading GT dynamic mask from {gt_mask_dir} ...")
+        gt_pair_mask = _load_gt_pair_mask(gt_mask_dir, image_paths, H_vggt, W_vggt, device)
+        net.update_dynamic_mask(gt_pair_mask)
+        _mask_refresh = args.niter + 1  # never recompute self-mask during TTO
+        print(f"[vggt-dyn] GT mask loaded — self-mask recomputation disabled")
+    else:
+        _mask_refresh = args.mask_refresh
 
     # ── 5. Optimization loop ──────────────────────────────────────────────────
     print(f"[vggt-dyn] optimising {args.niter} iters (loss={args.loss_version}) ...")
@@ -347,7 +401,7 @@ def run_pipeline(args):
         )
         loss_history.append(float(total_loss))
 
-        if it % args.mask_refresh == (args.mask_refresh - 1):
+        if it % _mask_refresh == (_mask_refresh - 1):
             mask = get_dynamic_mask_from_optimizer(
                 net, threshold=args.mask_threshold, normalize=True,
             )
@@ -375,7 +429,10 @@ def run_pipeline(args):
             with open(os.path.join(ckpt_dir, "metrics.json"), "w") as f:
                 json.dump({"iter": it + 1, "loss": float(total_loss)}, f, indent=2)
 
-    print(f"[vggt-dyn] final loss: {loss_history[-1]:.4f} (was {loss_history[0]:.4f})")
+    if loss_history:
+        print(f"[vggt-dyn] final loss: {loss_history[-1]:.4f} (was {loss_history[0]:.4f})")
+    else:
+        print("[vggt-dyn] niter=0, no optimization")
 
     # ── 6. Extract and save results ───────────────────────────────────────────
     print("[vggt-dyn] saving results ...")
@@ -388,8 +445,8 @@ def run_pipeline(args):
 
     metrics = {
         "niter":        args.niter,
-        "loss_init":    loss_history[0],
-        "loss_final":   loss_history[-1],
+        "loss_init":    loss_history[0] if loss_history else None,
+        "loss_final":   loss_history[-1] if loss_history else None,
         "loss_history": loss_history,
         "preprocess":   _preprocess,
         "anchor_conf_stats": conf_stats,

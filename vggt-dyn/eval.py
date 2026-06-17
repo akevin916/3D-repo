@@ -32,6 +32,13 @@ Usage (Sintel):
         --output_dir        outputs/my_sintel_run \\
         --scene_dir         data/sintel/depth/alley_2 \\
         --align_scale_mode  scale_and_shift
+
+Usage (Sintel dynamic mask quality vs GT):
+    python eval.py sintel_dynamic_mask \\
+        --output_dir        outputs/my_sintel_run \\
+        --gt_label_dir      data/sintel/training/dynamic_label/alley_2 \\
+        --pred_mask_dir     outputs/my_sintel_run/dynamic_mask \\
+        --pred_mask_format  npy
 """
 
 import os
@@ -135,6 +142,18 @@ def parse_args():
     spp.add_argument("--pose_eval_stride", type=int, default=1,
                      help="frame stride for evaluation")
 
+    # ── SINTEL DYNAMIC MASK ──────────────────────────────────────────────────
+    sdm = sub.add_parser("sintel_dynamic_mask", parents=[common_parent],
+                         help="Dynamic-mask quality vs Sintel GT label (IoU/precision/recall)")
+    sdm.add_argument("--gt_label_dir", required=True,
+                     help="Sintel GT dynamic-label dir (per-pair PNGs), "
+                          "see scripts/gen_sintel_gt_dynamic_mask.py")
+    sdm.add_argument("--pred_mask_dir", required=True,
+                     help="directory containing predicted per-frame masks")
+    sdm.add_argument("--pred_mask_format", choices=["npy", "png"], default="npy",
+                     help="'npy' = VGGT-Dyn dynamic_mask/{i:04d}.npy, "
+                          "'png' = MonST3R dynamic_mask_{i}.png")
+
     return p.parse_args()
 
 
@@ -167,3 +186,7 @@ if __name__ == "__main__":
             args.gt_cam_dir = args.gt_traj_dir
         from evaluators.sintel_pose import SintelPoseEvaluator
         SintelPoseEvaluator().run(args)
+
+    elif args.mode == "sintel_dynamic_mask":
+        from evaluators.sintel_dynamic_mask import SintelDynamicMaskEvaluator
+        SintelDynamicMaskEvaluator().run(args)

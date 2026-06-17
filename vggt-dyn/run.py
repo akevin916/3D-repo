@@ -68,7 +68,15 @@ def parse_args():
     p.add_argument("--anchor_weight",     type=float, default=1.0,  help="[mon] anchor loss weight")
     p.add_argument("--flow_weight",       type=float, default=1.0,  help="[mon] flow loss weight")
     p.add_argument("--depth_reg_weight",  type=float, default=0.1,  help="[mon] depth regularization weight")
-    p.add_argument("--mon_smooth_weight", type=float, default=0.1,  help="[mon] global 3D track smoothness weight")
+    p.add_argument("--smooth_weight",        type=float, default=0.1,  help="[mon] pose smooth loss weight")
+    p.add_argument("--translation_weight",  type=float, default=0.1,
+                   help="[mon] rotation-vs-translation balance inside pose smooth loss")
+    p.add_argument("--flow_loss_start_frac", type=float, default=0.15,
+                   help="[mon] skip flow loss for first this fraction of iters (warmup)")
+    p.add_argument("--flow_loss_thre",      type=float, default=50.0,
+                   help="[mon] disable flow loss for this iter if loss > threshold (0=off)")
+    p.add_argument("--pxl_thre",            type=float, default=50.0,
+                   help="[mon] per-pixel flow loss outlier cutoff in pixels (0=off)")
     # dyn weights
     p.add_argument("--dyn_pointmap_weight", type=float, default=1.0,
                    help="[dyn] λ — dynamic pointmap regression weight")
@@ -78,6 +86,10 @@ def parse_args():
     # Dynamic mask
     p.add_argument("--mask_refresh",   type=int,   default=10,   help="refresh dynamic mask every N iters")
     p.add_argument("--mask_threshold", type=float, default=0.35, help="normalized flow-residual threshold")
+    p.add_argument("--gt_mask_dir",    default=None,
+                   help="directory containing GT dynamic-mask PNGs (frame_XXXX.png, binary). "
+                        "If set, masks are loaded from disk at init and NOT recomputed during TTO. "
+                        "Expected file names must match the basenames of --images.")
 
     # Intermediate evaluation
     p.add_argument("--eval_every", type=int, default=0,
@@ -86,6 +98,9 @@ def parse_args():
 
     p.add_argument("--freeze_pose", action="store_true",
                    help="freeze delta_rotvec/delta_t (pose not optimized; depth-only TTO)")
+    p.add_argument("--scale_flow_loss", action="store_true",
+                   help="Exp C: per-pair stop-gradient scale normalization on flow loss "
+                        "(removes ego_flow magnitude bias from TTO gradients)")
 
     # Misc
     p.add_argument("--device",  default="cuda")
