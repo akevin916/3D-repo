@@ -1,19 +1,18 @@
 #!/usr/bin/env python3
-"""Original VGGT depth inference in single-frame mode (no TTO, no dynamic mask).
+"""Per-frame VGGT depth inference (single-frame mode, no TTO).
 
-This is the **native VGGT baseline**: one feed-forward pass per frame (S=1),
-without any test-time optimization.  Outputs are saved in the layout expected
-by eval.py / scripts/batch.py single_frame:
+One feed-forward pass per frame (S=1), no test-time optimization.
+Outputs are saved in the layout expected by eval.py / scripts/batch.py:
 
     <output>/depth/0000.npy
     <output>/depth_orig_res/0000.npy
 
-Invoked by scripts/batch.py single_frame.  Can also be run standalone:
+Can be run standalone:
 
-    python scripts/vggt_baseline.py \
+    python run_single_frame.py \
       --images "../data/bonn/rgbd_bonn_dataset/rgbd_bonn_balloon2/rgb_110/*.png" \
-      --checkpoint ../vggt/checkpoints/VGGT-1B.pt \
-      --output outputs/vggt_baseline/bonn_balloon2
+      --checkpoint vggt/checkpoints/VGGT-1B.pt \
+      --output outputs/single_frame/bonn_balloon2
 """
 
 import os
@@ -24,7 +23,7 @@ import numpy as np
 import torch
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-VGGT_ROOT = os.path.abspath(os.path.join(SCRIPT_DIR, "..", "vggt"))
+VGGT_ROOT = os.path.join(SCRIPT_DIR, "vggt")
 
 import sys
 if VGGT_ROOT not in sys.path:
@@ -66,9 +65,9 @@ def _load_model(checkpoint: str, device: str) -> VGGT:
 
 
 def parse_args():
-    p = argparse.ArgumentParser(description="Original VGGT single-frame depth inference")
+    p = argparse.ArgumentParser(description="Per-frame VGGT depth inference (no TTO)")
     p.add_argument("--images", required=True, help="glob pattern for input frames")
-    p.add_argument("--checkpoint", default="../vggt/checkpoints/VGGT-1B.pt",
+    p.add_argument("--checkpoint", default="vggt/checkpoints/VGGT-1B.pt",
                    help="path to VGGT checkpoint")
     p.add_argument("--output", required=True, help="output directory")
     p.add_argument("--device", default="cuda", help="cuda or cpu")
@@ -98,8 +97,8 @@ def main():
     device = args.device if (args.device == "cpu" or torch.cuda.is_available()) else "cpu"
     dtype = torch.bfloat16 if (device.startswith("cuda") and torch.cuda.get_device_capability()[0] >= 8) else torch.float16
 
-    print(f"[vggt-single] device={device} dtype={dtype}")
-    print(f"[vggt-single] loading checkpoint: {checkpoint}")
+    print(f"[single-frame] device={device} dtype={dtype}")
+    print(f"[single-frame] loading checkpoint: {checkpoint}")
     model = _load_model(checkpoint, device)
 
     manifest = []
@@ -130,12 +129,12 @@ def main():
         })
 
         if i % 50 == 0:
-            print(f"[vggt-single] processed {i+1}/{len(image_paths)}")
+            print(f"[single-frame] processed {i+1}/{len(image_paths)}")
 
     with open(os.path.join(output_dir, "manifest.json"), "w") as f:
         json.dump({"num_frames": len(image_paths), "frames": manifest}, f, indent=2)
 
-    print(f"[vggt-single] done: {output_dir}")
+    print(f"[single-frame] done: {output_dir}")
 
 
 if __name__ == "__main__":

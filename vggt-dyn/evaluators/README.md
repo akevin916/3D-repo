@@ -341,22 +341,24 @@ python scripts/batch.py depth \
 - `--skip_existing`、`--continue_on_error`、`--dry_run`
 - `--use_eigen_crop`：KITTI 開啟 Eigen crop（預設關閉）
 
-### 原生 VGGT Baseline 批次評估（scripts/vggt_baseline.py）
+### 單幀 VGGT 深度評估（depth --mode single）
 
-無 TTO 最佳化，純 VGGT feed-forward baseline：
+無 TTO 最佳化，純 VGGT feed-forward，每幀獨立推理（run_single_frame.py）：
 
 ```bash
 cd vggt-dyn
-python scripts/batch.py single_frame \
+python scripts/batch.py depth \
   --dataset bonn \
+  --mode single \
   --stage all \
   --output_root outputs/vggt_single_frame_bonn \
   --checkpoint ../vggt/checkpoints/VGGT-1B.pt \
   --max_depth 70 \
   --device cuda
 
-python scripts/batch.py single_frame \
+python scripts/batch.py depth \
   --dataset kitti \
+  --mode single \
   --stage all \
   --image_dir ../data/kitti/depth_selection/val_selection_cropped/image \
   --gt_dir ../data/kitti/depth_selection/val_selection_cropped/groundtruth_depth \

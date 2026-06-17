@@ -3,14 +3,18 @@
 
 Subcommands
 -----------
-  depth        --dataset bonn|sintel|kitti
-               run.py + eval.py  (depth metrics: AbsRel/RMSE/δ)
+  depth        --dataset bonn|sintel|kitti  [--mode single|multi]
+               run.py (multi) or run_single_frame.py (single) + eval.py
+               depth metrics: AbsRel/RMSE/δ
+
+               --mode multi (default): VGGT-Dyn with TTO across all frames
+               --mode single:          per-frame VGGT inference, no TTO
 
   pose
                run.py + eval.py sintel_pose  (ATE/RPE)
 
-  single_frame --dataset bonn|sintel|kitti
-               scripts/vggt_baseline.py + eval.py  (original VGGT, no TTO)
+  mask         --target vggt_dyn|monst3r
+               eval.py sintel_dynamic_mask  (dynamic-mask IoU/precision/recall vs Sintel GT)
 
 This script replaces the four root-level batch scripts:
   depth_batch.py, kitti_batch.py, sintel_pose_batch.py,
@@ -176,9 +180,12 @@ def _resolve_sequences_pose(args) -> List[str]:
     return list(MONST3R_SINTEL_SUBSET)
 
 
-def _resolve_sequences_sf(args) -> List[Dict[str, str]]:
-    """single_frame: same logic as depth."""
-    return _resolve_sequences_depth(args)
+def _resolve_sequences_mask(args) -> List[str]:
+    if args.sequences:
+        return _parse_seq_csv(args.sequences)
+    if args.full_seq:
+        return _discover_sintel(args.gt_label_root)
+    return list(MONST3R_SINTEL_SUBSET)
 
 
 # ---------------------------------------------------------------------------
@@ -210,53 +217,79 @@ def _depth_result_json(dataset: str, scene_name: str, mode: str) -> str:
     return base + suffix + ".json"
 
 
-def _sf_result_json(dataset: str, scene_name: str) -> str:
-    if dataset == "bonn":
-        return f"eval_bonn_{scene_name}_single_frame.json"
-    if dataset == "kitti":
-        return "eval_kitti_single_frame.json"
-    return f"eval_sintel_{scene_name}_single_frame.json"
-
 
 # ===========================================================================
 # depth subcommand
 # ===========================================================================
 
 def _depth_run(args, sequences: List[Dict]) -> int:
-    run_py = os.path.join(_PROJECT_DIR, "run.py")
-    if not os.path.isfile(run_py):
-        raise FileNotFoundError(f"run.py not found: {run_py}")
-    if not args.ckpt or not args.raft:
-        raise ValueError("--ckpt and --raft are required for stage=run/all")
-
     os.makedirs(args.output_root, exist_ok=True)
     exit_code = 0
 
-    for item in sequences:
-        seq, scene_name = item["seq"], item["scene_name"]
-        out_dir = os.path.join(args.output_root, seq)
+    if args.mode == "single":
+        run_py = os.path.join(_PROJECT_DIR, "run_single_frame.py")
+        if not os.path.isfile(run_py):
+            raise FileNotFoundError(f"run_single_frame.py not found: {run_py}")
+        if not args.checkpoint:
+            raise ValueError("--checkpoint is required for --mode single")
 
-        if args.skip_existing and os.path.isfile(os.path.join(out_dir, "metrics.json")):
-            print(f"[skip] {seq}")
-            continue
+        for item in sequences:
+            seq, scene_name = item["seq"], item["scene_name"]
+            out_dir = os.path.join(args.output_root, seq)
 
-        image_glob = _image_glob_depth(args, scene_name)
-        cmd = [sys.executable, run_py,
-               "--images", image_glob, "--ckpt", args.ckpt, "--raft", args.raft,
-               "--output", out_dir, "--preprocess", args.preprocess,
-               "--niter", str(args.niter), "--loss_version", args.loss_version,
-               "--device", args.device]
-        if args.max_frames:
-            cmd += ["--max_frames", str(args.max_frames)]
-        if args.verbose:
-            cmd += ["--verbose"]
+            if args.skip_existing and os.path.isfile(os.path.join(out_dir, "manifest.json")):
+                print(f"[skip] {seq}")
+                continue
 
-        rc = _run_cmd(cmd, args.dry_run)
-        if rc != 0:
-            print(f"[error] run failed: {seq} (exit={rc})")
-            exit_code = rc
-            if not args.continue_on_error:
-                return exit_code
+            image_glob = _image_glob_depth(args, scene_name)
+            cmd = [sys.executable, run_py,
+                   "--images", image_glob, "--checkpoint", args.checkpoint,
+                   "--output", out_dir, "--device", args.device]
+            if args.max_frames:
+                cmd += ["--max_frames", str(args.max_frames)]
+            if args.save_conf:
+                cmd += ["--save_conf"]
+
+            rc = _run_cmd(cmd, args.dry_run)
+            if rc != 0:
+                print(f"[error] run failed: {seq} (exit={rc})")
+                exit_code = rc
+                if not args.continue_on_error:
+                    return exit_code
+
+    else:  # multi
+        run_py = os.path.join(_PROJECT_DIR, "run.py")
+        if not os.path.isfile(run_py):
+            raise FileNotFoundError(f"run.py not found: {run_py}")
+        if not args.ckpt or not args.raft:
+            raise ValueError("--ckpt and --raft are required for --mode multi")
+
+        for item in sequences:
+            seq, scene_name = item["seq"], item["scene_name"]
+            out_dir = os.path.join(args.output_root, seq)
+
+            if args.skip_existing and os.path.isfile(os.path.join(out_dir, "metrics.json")):
+                print(f"[skip] {seq}")
+                continue
+
+            image_glob = _image_glob_depth(args, scene_name)
+            cmd = [sys.executable, run_py,
+                   "--images", image_glob, "--ckpt", args.ckpt, "--raft", args.raft,
+                   "--output", out_dir, "--preprocess", args.preprocess,
+                   "--niter", str(args.niter), "--loss_version", args.loss_version,
+                   "--device", args.device]
+            if args.max_frames:
+                cmd += ["--max_frames", str(args.max_frames)]
+            if args.verbose:
+                cmd += ["--verbose"]
+
+            rc = _run_cmd(cmd, args.dry_run)
+            if rc != 0:
+                print(f"[error] run failed: {seq} (exit={rc})")
+                exit_code = rc
+                if not args.continue_on_error:
+                    return exit_code
+
     return exit_code
 
 
@@ -264,6 +297,8 @@ def _depth_eval(args, sequences: List[Dict]) -> int:
     eval_py = os.path.join(_PROJECT_DIR, "eval.py")
     if not os.path.isfile(eval_py):
         raise FileNotFoundError(f"eval.py not found: {eval_py}")
+
+    align_mode = "single_frame" if args.mode == "single" else args.align_scale_mode
 
     rows: List[Dict] = []
     exit_code = 0
@@ -278,7 +313,7 @@ def _depth_eval(args, sequences: List[Dict]) -> int:
         if args.dataset == "kitti":
             cmd = [sys.executable, eval_py, "kitti",
                    "--output_dir", out_dir, "--gt_dir", args.gt_dir,
-                   "--drive", seq, "--align_scale_mode", args.align_scale_mode,
+                   "--drive", seq, "--align_scale_mode", align_mode,
                    "--max_depth", str(args.max_depth)]
             if not args.use_eigen_crop:
                 cmd += ["--no_eigen_crop"]
@@ -286,7 +321,7 @@ def _depth_eval(args, sequences: List[Dict]) -> int:
             scene_dir = os.path.join(args.gt_dir, scene_name)
             cmd = [sys.executable, eval_py, args.dataset,
                    "--output_dir", out_dir, "--scene_dir", scene_dir,
-                   "--align_scale_mode", args.align_scale_mode,
+                   "--align_scale_mode", align_mode,
                    "--max_depth", str(args.max_depth),
                    "--min_depth", str(args.min_depth)]
             if args.dataset == "sintel":
@@ -304,7 +339,7 @@ def _depth_eval(args, sequences: List[Dict]) -> int:
             continue
 
         result_path = os.path.join(out_dir, _depth_result_json(
-            args.dataset, scene_name, args.align_scale_mode))
+            args.dataset, scene_name, align_mode))
         if os.path.isfile(result_path):
             with open(result_path) as f:
                 m = json.load(f)
@@ -316,14 +351,14 @@ def _depth_eval(args, sequences: List[Dict]) -> int:
 
     if not args.dry_run and rows:
         summary = {
-            "dataset": args.dataset, "align_scale_mode": args.align_scale_mode,
+            "dataset": args.dataset, "align_scale_mode": align_mode,
             "max_depth": args.max_depth,
             "full_seq": getattr(args, "full_seq", False),
             "num_sequences": len(rows),
             "per_sequence": rows,
             "mean": _mean_metrics(rows),
         }
-        sname = f"{args.dataset}_eval_summary_{args.align_scale_mode}.json"
+        sname = f"{args.dataset}_eval_summary_{align_mode}.json"
         spath = os.path.join(args.output_root, sname)
         with open(spath, "w") as f:
             json.dump(summary, f, indent=2)
@@ -361,6 +396,11 @@ def _pose_run(args, sequences: List[str]) -> int:
             cmd += ["--max_frames", str(args.max_frames)]
         if args.verbose:
             cmd += ["--verbose"]
+        gt_mask_root = getattr(args, "gt_mask_dir", None)
+        if gt_mask_root:
+            cmd += ["--gt_mask_dir", os.path.join(gt_mask_root, seq)]
+        if getattr(args, "scale_flow_loss", False):
+            cmd += ["--scale_flow_loss"]
 
         rc = _run_cmd(cmd, args.dry_run)
         if rc != 0:
@@ -444,112 +484,121 @@ def _pose_eval(args, sequences: List[str]) -> int:
 
 
 # ===========================================================================
-# single_frame subcommand
+# mask subcommand (Sintel dynamic-mask quality vs GT)
 # ===========================================================================
 
-def _sf_run(args, sequences: List[Dict]) -> int:
-    run_py = os.path.join(_SCRIPT_DIR, "vggt_baseline.py")
-    if not os.path.isfile(run_py):
-        raise FileNotFoundError(f"vggt_baseline.py not found: {run_py}")
-    if not args.checkpoint:
-        raise ValueError("--checkpoint is required for stage=run/all")
-
-    os.makedirs(args.output_root, exist_ok=True)
-    exit_code = 0
-
-    for item in sequences:
-        seq, scene_name = item["seq"], item["scene_name"]
-        out_dir = os.path.join(args.output_root, seq)
-
-        if args.skip_existing and os.path.isfile(os.path.join(out_dir, "manifest.json")):
-            print(f"[skip] {seq}")
-            continue
-
-        image_glob = _image_glob_depth(args, scene_name)
-        cmd = [sys.executable, run_py,
-               "--images", image_glob, "--checkpoint", args.checkpoint,
-               "--output", out_dir, "--device", args.device]
-        if args.max_frames:
-            cmd += ["--max_frames", str(args.max_frames)]
-        if args.save_conf:
-            cmd += ["--save_conf"]
-
-        rc = _run_cmd(cmd, args.dry_run)
-        if rc != 0:
-            print(f"[error] single-frame run failed: {seq} (exit={rc})")
-            exit_code = rc
-            if not args.continue_on_error:
-                return exit_code
-    return exit_code
-
-
-def _sf_eval(args, sequences: List[Dict]) -> int:
+def _mask_eval(args, sequences: List[str]) -> int:
     eval_py = os.path.join(_PROJECT_DIR, "eval.py")
     if not os.path.isfile(eval_py):
         raise FileNotFoundError(f"eval.py not found: {eval_py}")
 
+    pred_mask_format = "npy" if args.target == "vggt_dyn" else "png"
+
     rows: List[Dict] = []
+    log_lines: List[str] = []
     exit_code = 0
 
-    for item in sequences:
-        seq, scene_name = item["seq"], item["scene_name"]
-        out_dir = os.path.join(args.output_root, seq)
-        if not os.path.isdir(out_dir):
-            print(f"[skip] {seq} (missing output dir)")
+    for seq in sequences:
+        seq_dir = os.path.join(args.pred_root, seq)
+        if not os.path.isdir(seq_dir):
+            print(f"[skip] {seq} (missing pred dir: {seq_dir})")
             continue
 
-        if args.dataset == "kitti":
-            cmd = [sys.executable, eval_py, "kitti",
-                   "--output_dir", out_dir, "--gt_dir", args.gt_dir,
-                   "--drive", seq, "--align_scale_mode", "single_frame",
-                   "--max_depth", str(args.max_depth)]
-            if not args.use_eigen_crop:
-                cmd += ["--no_eigen_crop"]
-        else:
-            scene_dir = os.path.join(args.gt_dir, scene_name)
-            cmd = [sys.executable, eval_py, args.dataset,
-                   "--output_dir", out_dir, "--scene_dir", scene_dir,
-                   "--align_scale_mode", "single_frame",
-                   "--max_depth", str(args.max_depth),
-                   "--min_depth", str(args.min_depth)]
-            if args.dataset == "sintel":
-                cmd += ["--post_clip_max", str(args.post_clip_max)]
+        gt_label_dir = os.path.join(args.gt_label_root, seq)
+        pred_mask_dir = os.path.join(seq_dir, "dynamic_mask") if args.target == "vggt_dyn" else seq_dir
+        result_json = os.path.join(seq_dir, "eval_sintel_dynamic_mask.json")
+
+        cmd = [sys.executable, eval_py, "sintel_dynamic_mask",
+               "--output_dir", seq_dir,
+               "--gt_label_dir", gt_label_dir,
+               "--pred_mask_dir", pred_mask_dir,
+               "--pred_mask_format", pred_mask_format]
 
         rc = _run_cmd(cmd, args.dry_run)
         if rc != 0:
-            print(f"[error] eval failed: {seq} (exit={rc})")
+            print(f"[error] mask eval failed: {seq} (exit={rc})")
+            log_lines.append(f"Sintel-{seq:<16} | EVAL FAILED")
             exit_code = rc
             if not args.continue_on_error:
-                return exit_code
+                break
             continue
 
         if args.dry_run:
             continue
 
-        result_path = os.path.join(out_dir, _sf_result_json(args.dataset, scene_name))
-        if os.path.isfile(result_path):
-            with open(result_path) as f:
+        if os.path.isfile(result_json):
+            with open(result_json) as f:
                 m = json.load(f)
             m["sequence"] = seq
-            m["scene_name"] = scene_name
             rows.append(m)
+            log_lines.append(
+                f"Sintel-{seq:<16} | IoU: {m['iou']:.4f}  recall: {m['recall']:.4f}  "
+                f"precision: {m['precision']:.4f}  dyn_ratio: {m['dynamic_ratio']:.4f}")
         else:
-            print(f"[warn] result json not found: {result_path}")
+            log_lines.append(f"Sintel-{seq:<16} | MISSING RESULT JSON")
 
-    if not args.dry_run and rows:
+    if not args.dry_run:
+        for line in log_lines:
+            print(line)
         summary = {
-            "dataset": args.dataset, "protocol": "original_vggt_single_frame",
-            "align_scale_mode": "single_frame",
-            "max_depth": args.max_depth,
+            "dataset": "sintel", "target": args.target,
+            "full_seq": args.full_seq,
             "num_sequences": len(rows),
             "per_sequence": rows,
-            "mean": _mean_metrics(rows),
+            "mean": _mean_metrics(rows, weighted=False),
         }
-        sname = f"{args.dataset}_vggt_single_frame_summary.json"
-        spath = os.path.join(args.output_root, sname)
+        spath = os.path.join(args.output_summary_dir, "sintel_dynamic_mask_summary.json")
         with open(spath, "w") as f:
             json.dump(summary, f, indent=2)
         print(f"[done] summary → {spath}")
+    return exit_code
+
+
+# ===========================================================================
+# viz subcommand
+# ===========================================================================
+
+def _discover_viz_sequences(output_root: str) -> List[str]:
+    """Return sequence names (subdirs with a depth/ folder) sorted alphabetically."""
+    if not os.path.isdir(output_root):
+        raise FileNotFoundError(f"output_root not found: {output_root}")
+    seqs = sorted(
+        name for name in os.listdir(output_root)
+        if os.path.isdir(os.path.join(output_root, name, "depth"))
+    )
+    if not seqs:
+        raise RuntimeError(f"No sequence dirs with depth/ found under: {output_root}")
+    return seqs
+
+
+def _viz_run(args, sequences: List[str]) -> int:
+    viz_py = os.path.join(_PROJECT_DIR, "visualize.py")
+    if not os.path.isfile(viz_py):
+        raise FileNotFoundError(f"visualize.py not found: {viz_py}")
+
+    exit_code = 0
+    for seq in sequences:
+        out_dir = os.path.join(args.output_root, seq)
+        if not os.path.isdir(out_dir):
+            print(f"[skip] {seq} (missing output dir)")
+            continue
+
+        cmd = [sys.executable, viz_py, "gif",
+               "--output_dir", out_dir,
+               "--fps", str(args.fps),
+               "--threshold", str(args.threshold),
+               "--device", args.device]
+        if args.raft:
+            cmd += ["--raft", args.raft]
+        if args.max_frames:
+            cmd += ["--max_frames", str(args.max_frames)]
+
+        rc = _run_cmd(cmd, args.dry_run)
+        if rc != 0:
+            print(f"[error] viz failed: {seq} (exit={rc})")
+            exit_code = rc
+            if not args.continue_on_error:
+                return exit_code
     return exit_code
 
 
@@ -578,8 +627,11 @@ def _resolve_paths_depth(args):
     args.image_dir   = _abs(args.image_dir   or defaults_image[args.dataset], base)
     args.gt_dir      = _abs(args.gt_dir      or defaults_gt[args.dataset],    base)
     args.output_root = _abs(args.output_root or f"outputs/{args.dataset}_batch", base)
-    if args.ckpt: args.ckpt = _abs(args.ckpt, base)
-    if args.raft: args.raft = _abs(args.raft, base)
+    if args.mode == "single":
+        args.checkpoint = _abs(args.checkpoint or "vggt/checkpoints/VGGT-1B.pt", base)
+    else:
+        if args.ckpt: args.ckpt = _abs(args.ckpt, base)
+        if args.raft: args.raft = _abs(args.raft, base)
 
 
 def _resolve_paths_pose(args):
@@ -589,24 +641,16 @@ def _resolve_paths_pose(args):
     args.output_root = _abs(args.output_root or "outputs/sintel_pose_batch",             base)
     if args.ckpt: args.ckpt = _abs(args.ckpt, base)
     if args.raft: args.raft = _abs(args.raft, base)
+    if getattr(args, "gt_mask_dir", None):
+        args.gt_mask_dir = _abs(args.gt_mask_dir, base)
 
 
-def _resolve_paths_sf(args):
+def _resolve_paths_mask(args):
     base = _PROJECT_DIR
-    defaults_image = {
-        "bonn":   "../data/bonn/rgbd_bonn_dataset",
-        "sintel": "../data/sintel/training/final",
-        "kitti":  "../data/kitti/depth_selection/val_selection_cropped/image",
-    }
-    defaults_gt = {
-        "bonn":   "../data/bonn/rgbd_bonn_dataset",
-        "sintel": "../data/sintel/training/depth",
-        "kitti":  "../data/kitti/depth_selection/val_selection_cropped/groundtruth_depth",
-    }
-    args.image_dir   = _abs(args.image_dir   or defaults_image[args.dataset], base)
-    args.gt_dir      = _abs(args.gt_dir      or defaults_gt[args.dataset],    base)
-    args.output_root = _abs(args.output_root or f"outputs/vggt_single_frame_{args.dataset}", base)
-    args.checkpoint  = _abs(args.checkpoint  or "../vggt/checkpoints/VGGT-1B.pt", base)
+    args.gt_label_root = _abs(args.gt_label_root or "../data/sintel/training/dynamic_label", base)
+    args.pred_root      = _abs(args.pred_root, base)
+    args.output_summary_dir = _abs(args.output_summary_dir or args.pred_root, base)
+
 
 
 # ===========================================================================
@@ -656,14 +700,18 @@ def parse_args():
 
     # ── depth ─────────────────────────────────────────────────────────────────
     dp = sub.add_parser("depth",
-                        help="run.py + eval.py depth metrics (Bonn/Sintel/KITTI)")
+                        help="depth metrics (Bonn/Sintel/KITTI); --mode single|multi")
     dp.add_argument("--dataset",  choices=["bonn", "sintel", "kitti"], required=True)
+    dp.add_argument("--mode",     choices=["single", "multi"], default="multi",
+                    help="single: per-frame VGGT (no TTO); multi: VGGT-Dyn with TTO (default)")
     dp.add_argument("--stage",    choices=["run", "eval", "all"], default="all")
     dp.add_argument("--image_dir", default=None)
     dp.add_argument("--gt_dir",    default=None)
     dp.add_argument("--output_root", default=None)
     _add_batch_opts(dp)
     _add_run_opts(dp)
+    dp.add_argument("--checkpoint", default=None, help="[single] VGGT-1B checkpoint (.pt)")
+    dp.add_argument("--save_conf",  action="store_true", help="[single] save depth confidence maps")
     _add_depth_eval_opts(dp)
 
     # ── pose ──────────────────────────────────────────────────────────────────
@@ -677,21 +725,50 @@ def parse_args():
     _add_run_opts(pp)
     pp.set_defaults(preprocess="center_crop", niter=300)  # override defaults for pose
     pp.add_argument("--pose_eval_stride", type=int, default=1)
+    pp.add_argument("--gt_mask_dir", default=None,
+                    help="root dir of GT dynamic-mask PNGs (e.g. data/sintel/training/dynamic_label). "
+                         "Each seq subfolder must contain frame_XXXX.png files. "
+                         "If set, GT masks are injected into the optimizer and self-mask is disabled.")
+    pp.add_argument("--scale_flow_loss", action="store_true",
+                    help="Exp C: per-pair scale-normalized flow loss (removes ego_flow magnitude bias)")
 
-    # ── single_frame ──────────────────────────────────────────────────────────
-    sf = sub.add_parser("single_frame",
-                        help="scripts/vggt_baseline.py + eval.py  (original VGGT, no TTO)")
-    sf.add_argument("--dataset",  choices=["bonn", "sintel", "kitti"], required=True)
-    sf.add_argument("--stage",    choices=["run", "eval", "all"], default="all")
-    sf.add_argument("--image_dir",  default=None)
-    sf.add_argument("--gt_dir",     default=None)
-    sf.add_argument("--output_root",default=None)
-    _add_batch_opts(sf)
-    sf.add_argument("--checkpoint", default=None, help="VGGT checkpoint (.pt)")
-    sf.add_argument("--device",     default="cuda")
-    sf.add_argument("--max_frames", type=int, default=None)
-    sf.add_argument("--save_conf",  action="store_true")
-    _add_depth_eval_opts(sf)
+    # ── mask ──────────────────────────────────────────────────────────────────
+    mp = sub.add_parser("mask",
+                        help="Sintel dynamic-mask quality vs GT label (IoU/precision/recall)")
+    mp.add_argument("--target", choices=["vggt_dyn", "monst3r"], required=True,
+                    help="vggt_dyn: <pred_root>/<seq>/dynamic_mask/*.npy; "
+                         "monst3r: <pred_root>/<seq>/dynamic_mask_*.png")
+    mp.add_argument("--pred_root", required=True,
+                    help="output_root of a previous 'pose' run (vggt_dyn) "
+                         "or MonST3R eval_pose --output_dir (monst3r)")
+    mp.add_argument("--gt_label_root", default=None,
+                    help="dir containing <seq>/frame_*.png GT dynamic labels "
+                         "(default: ../data/sintel/training/dynamic_label, "
+                         "see scripts/gen_sintel_gt_dynamic_mask.py)")
+    mp.add_argument("--output_summary_dir", default=None,
+                    help="where to write sintel_dynamic_mask_summary.json (default: pred_root)")
+    mp.add_argument("--skip_existing",    action="store_true")
+    mp.add_argument("--continue_on_error",action="store_true")
+    mp.add_argument("--dry_run",          action="store_true")
+    mp.add_argument("--sequences",  default=None, help="comma-separated sequence names")
+    mp.add_argument("--full_seq",   action="store_true",
+                    help="use all sequences discovered under --gt_label_root")
+
+    # ── viz ───────────────────────────────────────────────────────────────────
+    vp = sub.add_parser("viz",
+                        help="visualize.py gif for all sequences under output_root")
+    vp.add_argument("--output_root", required=True,
+                    help="root output dir from a previous depth/pose run")
+    vp.add_argument("--raft",      default=None, help="RAFT checkpoint (.pth); enables flow panels")
+    vp.add_argument("--fps",       type=int,   default=5)
+    vp.add_argument("--threshold", type=float, default=0.35)
+    vp.add_argument("--device",    default="cuda")
+    vp.add_argument("--max_frames",type=int,   default=None)
+    vp.add_argument("--sequences", default=None, help="comma-separated sequence names")
+    vp.add_argument("--skip_existing",    action="store_true",
+                    help="skip sequences that already have viz.gif")
+    vp.add_argument("--continue_on_error",action="store_true")
+    vp.add_argument("--dry_run",          action="store_true")
 
     return top.parse_args()
 
@@ -702,7 +779,7 @@ def main():
     if args.subcommand == "depth":
         _resolve_paths_depth(args)
         sequences = _resolve_sequences_depth(args)
-        print(f"[info] depth  dataset={args.dataset}  sequences={len(sequences)}")
+        print(f"[info] depth  dataset={args.dataset}  mode={args.mode}  sequences={len(sequences)}")
         for item in sequences:
             print(f"  - {item['seq']}")
         rc = 0
@@ -729,20 +806,29 @@ def main():
             rc2 = _pose_eval(args, sequences)
             rc = rc or rc2
 
-    elif args.subcommand == "single_frame":
-        _resolve_paths_sf(args)
-        sequences = _resolve_sequences_sf(args)
-        print(f"[info] single_frame  dataset={args.dataset}  sequences={len(sequences)}")
-        for item in sequences:
-            print(f"  - {item['seq']}")
-        rc = 0
-        if args.stage in ("run", "all"):
-            rc = _sf_run(args, sequences)
-            if rc != 0 and not args.continue_on_error:
-                sys.exit(rc)
-        if args.stage in ("eval", "all"):
-            rc2 = _sf_eval(args, sequences)
-            rc = rc or rc2
+    elif args.subcommand == "mask":
+        _resolve_paths_mask(args)
+        sequences = _resolve_sequences_mask(args)
+        print(f"[info] mask  target={args.target}  sequences={len(sequences)}")
+        for s in sequences:
+            print(f"  - {s}")
+        rc = _mask_eval(args, sequences)
+
+    elif args.subcommand == "viz":
+        args.output_root = _abs(args.output_root, _PROJECT_DIR)
+        if args.raft:
+            args.raft = _abs(args.raft, _PROJECT_DIR)
+        if args.sequences:
+            sequences = _parse_seq_csv(args.sequences)
+        else:
+            sequences = _discover_viz_sequences(args.output_root)
+        if args.skip_existing:
+            sequences = [s for s in sequences
+                         if not os.path.isfile(os.path.join(args.output_root, s, "viz.gif"))]
+        print(f"[info] viz  output_root={args.output_root}  sequences={len(sequences)}")
+        for s in sequences:
+            print(f"  - {s}")
+        rc = _viz_run(args, sequences)
 
     sys.exit(rc)
 

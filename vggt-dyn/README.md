@@ -91,7 +91,7 @@ vggt-dyn/
 │
 ├── run.py                        # TTO 優化 CLI 入口（thin wrapper → vggt_dyn/pipeline.py）
 ├── eval.py                       # 評估調度器：dispatches to evaluators/
-├── run_vggt_single_frame.py      # （已移至 scripts/vggt_baseline.py）
+├── run_single_frame.py           # 單幀 VGGT 推理（無 TTO）
 │
 ├── vggt_dyn/                     # 核心 TTO 套件（inference-time only）
 │   ├── __init__.py
@@ -123,8 +123,7 @@ vggt-dyn/
 │   └── train.py                  # 訓練主流程 CLI（單資料集 / 混合比例）
 │
 ├── scripts/                      # 批次執行 & 工具腳本
-│   ├── batch.py                  # 統一批次執行器（depth / pose / single_frame）
-│   ├── vggt_baseline.py          # 原生 VGGT 無 TTO 推理（baseline）
+│   ├── batch.py                  # 統一批次執行器（depth --mode single|multi / pose / mask）
 │   ├── inspect_components.py     # 元件診斷視覺化
 │   ├── visualize.py              # 診斷 GIF（RGB/Depth/Mask/Conf/RAFT-flow/Ego-flow）
 │   └── collect_eval_sum.py       # 匯整評估 JSON 至 eval_sum/
