@@ -35,11 +35,18 @@ from vggt_dyn.utils.flow_utils import compute_adjacent_flow
 # ===========================================================================
 
 def load_vggt(ckpt_path: str, device: torch.device):
-    """Load VGGT model from a local checkpoint."""
+    """Load VGGT model from a local checkpoint.
+
+    Accepts both raw state-dicts (original VGGT release) and full finetune
+    checkpoints saved by finetune/model_utils.py::save_checkpoint, which
+    wrap the state-dict under the 'model' key alongside optimizer/scaler/args.
+    """
     from vggt.models.vggt import VGGT
     model = VGGT()
-    state_dict = torch.load(ckpt_path, map_location="cpu", weights_only=True)
-    model.load_state_dict(state_dict)
+    ckpt = torch.load(ckpt_path, map_location="cpu", weights_only=False)
+    if isinstance(ckpt, dict) and "model" in ckpt:
+        ckpt = ckpt["model"]
+    model.load_state_dict(ckpt)
     return model.to(device).eval()
 
 
