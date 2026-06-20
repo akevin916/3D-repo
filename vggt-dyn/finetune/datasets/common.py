@@ -29,6 +29,25 @@ def load_rgb_np(path: str) -> np.ndarray:
     return np.array(Image.open(path).convert("RGB"), dtype=np.float32) / 255.0
 
 
+def sample_random_window(n: int, clip_len: int, expand_ratio: float = 2.0) -> List[int]:
+    """Sample clip_len sorted frame indices from a random local window.
+
+    Picks a random anchor frame, then draws clip_len frames without replacement
+    from [anchor ± clip_len*expand_ratio].  Indices are returned sorted so the
+    batch stays in temporal order and cam0 (index 0) is the earliest frame.
+    Mirrors VGGT's get_nearby_ids(expand_ratio=...) behaviour.
+    """
+    clip_len = min(clip_len, n)
+    anchor = int(np.random.randint(0, n))
+    half = max(clip_len, int(clip_len * expand_ratio))
+    lo = max(0, anchor - half)
+    hi = min(n, anchor + half)
+    pool = list(range(lo, hi))
+    replace = len(pool) < clip_len
+    idxs = np.random.choice(pool, size=clip_len, replace=replace).tolist()
+    return sorted(set(idxs)) if not replace else sorted(idxs)
+
+
 def sliding_windows(n: int, clip_len: int, stride: int) -> List[List[int]]:
     windows = []
     if n < 2:

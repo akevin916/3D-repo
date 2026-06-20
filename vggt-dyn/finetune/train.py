@@ -310,7 +310,7 @@ def train(args: argparse.Namespace) -> None:
     optimizer, scaler, start_epoch, global_step, best_epoch_loss, end_epoch = _setup_optimizer(
         param_groups, args, resume_state
     )
-    total_steps = max(1, args.epochs * len(loader))
+    total_steps = max(1, end_epoch * len(loader))
     history = _load_history(args)
 
     train_start = time.time()
@@ -394,7 +394,10 @@ def parse_args() -> argparse.Namespace:
 
     g_clip = p.add_argument_group("Clip sampling")
     g_clip.add_argument("--clip_len", type=int, default=8)
-    g_clip.add_argument("--stride", type=int, default=4)
+    g_clip.add_argument("--expand_ratio", type=float, default=2.0,
+                        help="Random window expand ratio (VGGT-style). 0 disables random sampling and uses --stride instead.")
+    g_clip.add_argument("--stride", type=int, default=4,
+                        help="Sliding-window stride (used only when --expand_ratio 0)")
     g_clip.add_argument("--max_depth", type=float, default=200.0)
 
     g_aug = p.add_argument_group("Augmentation (MonST3R alignment)")

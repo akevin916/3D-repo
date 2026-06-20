@@ -5,7 +5,7 @@ import cv2
 import numpy as np
 import torch
 
-from .common import c2w_to_w2c, crop_resize_to_fixed, load_rgb_np, make_clip_aug_params, sliding_windows
+from .common import c2w_to_w2c, crop_resize_to_fixed, load_rgb_np, make_clip_aug_params, sample_random_window, sliding_windows
 
 
 class WaymoClipDataset(torch.utils.data.Dataset):
@@ -16,11 +16,14 @@ class WaymoClipDataset(torch.utils.data.Dataset):
         root: str,
         clip_len: int = 8,
         stride: int = 4,
+        expand_ratio: float = 0.0,
         camera_id: int = 1,
         max_depth: float = 200.0,
         target_hw: tuple = (392, 518),
         aug_crop: int = 0,
     ):
+        self.clip_len = clip_len
+        self.expand_ratio = expand_ratio
         self.max_depth = max_depth
         self.target_hw = target_hw
         self.aug_crop = aug_crop
@@ -47,17 +50,23 @@ class WaymoClipDataset(torch.utils.data.Dataset):
                     good.append(fr)
 
             n = len(good)
-            for win in sliding_windows(n, clip_len, stride):
-                self.samples.append({"seg_dir": seg_dir, "frames": good, "idxs": win})
+            seq_entry = {"seg_dir": seg_dir, "frames": good, "n": n}
+            if expand_ratio > 0:
+                self.samples.append(seq_entry)
+            else:
+                for win in sliding_windows(n, clip_len, stride):
+                    self.samples.append({**seq_entry, "idxs": win})
 
     def __len__(self):
         return len(self.samples)
 
     def __getitem__(self, idx):
         s = self.samples[idx]
+        idxs = sample_random_window(s["n"], self.clip_len, self.expand_ratio) \
+            if self.expand_ratio > 0 else s["idxs"]
         imgs, depths, Ks, Es = [], [], [], []
         aug = make_clip_aug_params(self.aug_crop)
-        for i in s["idxs"]:
+        for i in idxs:
             fr = s["frames"][i]
             img = load_rgb_np(os.path.join(s["seg_dir"], fr + ".jpg"))
 

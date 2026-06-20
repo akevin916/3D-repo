@@ -21,6 +21,7 @@ log = logging.getLogger(__name__)
 def _add_val_dataset(datasets: list, args: argparse.Namespace, name: str, root: str, split: str) -> None:
     val_args = _clone_args_for_dataset(args, name, root)
     val_args.split = split
+    val_args.expand_ratio = 0.0  # always use fixed sliding windows for validation
     try:
         ds = build_dataset(val_args)
     except FileNotFoundError as e:

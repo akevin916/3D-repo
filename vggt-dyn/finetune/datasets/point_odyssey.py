@@ -11,6 +11,7 @@ from .common import (
     make_clip_aug_params,
     make_intrinsics,
     must_exist,
+    sample_random_window,
     sliding_windows,
 )
 
@@ -24,6 +25,7 @@ class PointOdysseyClipDataset(torch.utils.data.Dataset):
         split: str = "train",
         clip_len: int = 8,
         stride: int = 4,
+        expand_ratio: float = 0.0,
         max_depth: float = 1000.0,
         target_hw: tuple = (294, 518),
         aug_crop: int = 0,
@@ -32,6 +34,8 @@ class PointOdysseyClipDataset(torch.utils.data.Dataset):
         if not os.path.isdir(base):
             raise FileNotFoundError(f"PointOdyssey split folder not found: {base}")
 
+        self.clip_len = clip_len
+        self.expand_ratio = expand_ratio
         self.max_depth = max_depth
         self.target_hw = target_hw
         self.aug_crop = aug_crop
@@ -51,28 +55,32 @@ class PointOdysseyClipDataset(torch.utils.data.Dataset):
             rgbs = sorted(f for f in os.listdir(rgb_dir) if f.endswith(".jpg"))
             dpts = sorted(f for f in os.listdir(dpt_dir) if f.endswith(".png"))
             n = min(len(rgbs), len(dpts), intrinsics.shape[0], extrinsics.shape[0])
-            for win in sliding_windows(n, clip_len, stride):
-                self.samples.append(
-                    {
-                        "rgb_dir": rgb_dir,
-                        "dpt_dir": dpt_dir,
-                        "rgbs": rgbs,
-                        "dpts": dpts,
-                        "intrinsics": intrinsics,
-                        "extrinsics": extrinsics,
-                        "idxs": win,
-                    }
-                )
+            seq_entry = {
+                "rgb_dir": rgb_dir,
+                "dpt_dir": dpt_dir,
+                "rgbs": rgbs,
+                "dpts": dpts,
+                "intrinsics": intrinsics,
+                "extrinsics": extrinsics,
+                "n": n,
+            }
+            if expand_ratio > 0:
+                self.samples.append(seq_entry)
+            else:
+                for win in sliding_windows(n, clip_len, stride):
+                    self.samples.append({**seq_entry, "idxs": win})
 
     def __len__(self):
         return len(self.samples)
 
     def __getitem__(self, idx):
         s = self.samples[idx]
+        idxs = sample_random_window(s["n"], self.clip_len, self.expand_ratio) \
+            if self.expand_ratio > 0 else s["idxs"]
         imgs, depths, Ks, Es = [], [], [], []
 
         aug = make_clip_aug_params(self.aug_crop)
-        for i in s["idxs"]:
+        for i in idxs:
             img = load_rgb_np(os.path.join(s["rgb_dir"], s["rgbs"][i]))
             depth16 = cv2.imread(os.path.join(s["dpt_dir"], s["dpts"][i]), cv2.IMREAD_ANYDEPTH)
             depth = depth16.astype(np.float32) / 65535.0 * 1000.0

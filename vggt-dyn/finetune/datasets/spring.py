@@ -5,7 +5,7 @@ import h5py
 import numpy as np
 import torch
 
-from .common import crop_resize_to_fixed, load_rgb_np, make_clip_aug_params, sliding_windows
+from .common import crop_resize_to_fixed, load_rgb_np, make_clip_aug_params, sample_random_window, sliding_windows
 
 SPRING_BASELINE = 0.065
 
@@ -24,10 +24,13 @@ class SpringClipDataset(torch.utils.data.Dataset):
         split: str = "train",
         clip_len: int = 8,
         stride: int = 4,
+        expand_ratio: float = 0.0,
         max_depth: float = 100.0,
         target_hw: tuple = (294, 518),
         aug_crop: int = 0,
     ):
+        self.clip_len = clip_len
+        self.expand_ratio = expand_ratio
         self.max_depth = max_depth
         self.target_hw = target_hw
         self.aug_crop = aug_crop
@@ -49,29 +52,32 @@ class SpringClipDataset(torch.utils.data.Dataset):
             ext = np.loadtxt(ext_file, dtype=np.float32).reshape(-1, 4, 4)
             intr = np.loadtxt(int_file, dtype=np.float32).reshape(-1, 4)
             n = min(len(rgbs), len(dsps), ext.shape[0], intr.shape[0])
-
-            for win in sliding_windows(n, clip_len, stride):
-                self.samples.append(
-                    {
-                        "rgb_dir": rgb_dir,
-                        "dsp_dir": dsp_dir,
-                        "rgbs": rgbs,
-                        "dsps": dsps,
-                        "ext": ext,
-                        "intr": intr,
-                        "idxs": win,
-                    }
-                )
+            seq_entry = {
+                "rgb_dir": rgb_dir,
+                "dsp_dir": dsp_dir,
+                "rgbs": rgbs,
+                "dsps": dsps,
+                "ext": ext,
+                "intr": intr,
+                "n": n,
+            }
+            if expand_ratio > 0:
+                self.samples.append(seq_entry)
+            else:
+                for win in sliding_windows(n, clip_len, stride):
+                    self.samples.append({**seq_entry, "idxs": win})
 
     def __len__(self):
         return len(self.samples)
 
     def __getitem__(self, idx):
         s = self.samples[idx]
+        idxs = sample_random_window(s["n"], self.clip_len, self.expand_ratio) \
+            if self.expand_ratio > 0 else s["idxs"]
         imgs, depths, Ks, Es = [], [], [], []
 
         aug = make_clip_aug_params(self.aug_crop)
-        for i in s["idxs"]:
+        for i in idxs:
             img = load_rgb_np(os.path.join(s["rgb_dir"], s["rgbs"][i]))
 
             fx, fy, cx, cy = [float(x) for x in s["intr"][i]]
