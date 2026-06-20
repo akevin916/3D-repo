@@ -25,6 +25,7 @@ _ROOT = os.path.normpath(os.path.join(os.path.dirname(__file__), ".."))
 if _ROOT not in sys.path:
     sys.path.insert(0, _ROOT)
 
+import numpy as np
 import torch
 
 from vggt_dyn.utils.pose_utils import decode_pose_enc
@@ -135,3 +136,55 @@ class VGGTInitializer:
     def as_dict(self) -> dict:
         """Return a shallow copy of the state dict."""
         return dict(self._state)
+
+    @classmethod
+    def from_dir(cls, output_dir: str, device=None) -> "VGGTInitializer":
+        """Reconstruct initializer state from a previously saved run output directory.
+
+        Expects the directory structure written by save_outputs():
+            extrinsics.npy, intrinsics.npy, pts3d.npy,
+            depth/XXXX.npy, depth_conf/XXXX.npy (optional), anchor_conf/XXXX.npy (optional)
+        """
+        extrinsics = np.load(os.path.join(output_dir, "extrinsics.npy"))  # [S, 3, 4]
+        intrinsics  = np.load(os.path.join(output_dir, "intrinsics.npy")) # [S, 3, 3]
+        pts3d       = np.load(os.path.join(output_dir, "pts3d.npy"))      # [S, H, W, 3]
+
+        S = extrinsics.shape[0]
+        H, W = pts3d.shape[1], pts3d.shape[2]
+
+        depth_frames = [np.load(os.path.join(output_dir, "depth", f"{i:04d}.npy"))
+                        for i in range(S)]
+        depth = np.stack(depth_frames)  # [S, H, W]
+
+        # anchor_conf: prefer saved anchor_conf/, fall back to depth_conf/, then ones
+        anchor_conf_dir = os.path.join(output_dir, "anchor_conf")
+        depth_conf_dir  = os.path.join(output_dir, "depth_conf")
+        if os.path.isdir(anchor_conf_dir):
+            frames = [np.load(os.path.join(anchor_conf_dir, f"{i:04d}.npy")) for i in range(S)]
+            anchor_conf = np.stack(frames)
+        elif os.path.isdir(depth_conf_dir):
+            frames = [np.load(os.path.join(depth_conf_dir, f"{i:04d}.npy")) for i in range(S)]
+            anchor_conf = np.stack(frames)
+        else:
+            anchor_conf = np.ones((S, H, W), dtype=np.float32)
+
+        depth_conf_frames = [np.load(os.path.join(depth_conf_dir, f"{i:04d}.npy"))
+                             for i in range(S)] if os.path.isdir(depth_conf_dir) else None
+        depth_conf = np.stack(depth_conf_frames) if depth_conf_frames else anchor_conf
+
+        def _t(arr):
+            t = torch.from_numpy(arr.astype(np.float32))
+            return t.to(device) if device is not None else t
+
+        obj = cls.__new__(cls)
+        obj.image_size_hw = (H, W)
+        obj._state = {
+            "R":           _t(extrinsics[:, :3, :3]),
+            "T":           _t(extrinsics[:, :3, 3]),
+            "K":           _t(intrinsics),
+            "depth":       _t(depth),
+            "depth_conf":  _t(depth_conf),
+            "anchor_pts":  _t(pts3d),
+            "anchor_conf": _t(anchor_conf),
+        }
+        return obj

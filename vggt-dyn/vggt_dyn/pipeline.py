@@ -195,6 +195,59 @@ def _crop_depth_to_orig(depth_hw: np.ndarray,
 # Output saving
 # ===========================================================================
 
+def _load_gt_depth(
+    gt_depth_dir: str,
+    image_paths: list,
+    H: int,
+    W: int,
+    device: torch.device,
+    preprocess: str = "center_crop",
+) -> torch.Tensor:
+    """Load Sintel GT depth (.dpt) files, crop+resize to (H, W), return [S, H, W]."""
+    import cv2
+
+    SINTEL_TAG = 202021.25
+
+    def _read_dpt(path: str) -> np.ndarray:
+        with open(path, "rb") as f:
+            tag = np.frombuffer(f.read(4), dtype=np.float32)[0]
+            if abs(float(tag) - SINTEL_TAG) > 1e-4:
+                raise ValueError(f"Bad .dpt tag in {path}: {tag}")
+            width  = int(np.frombuffer(f.read(4), dtype=np.int32)[0])
+            height = int(np.frombuffer(f.read(4), dtype=np.int32)[0])
+            data   = np.frombuffer(f.read(width * height * 4), dtype=np.float32)
+        d = data.reshape(height, width).astype(np.float32)
+        d[~np.isfinite(d)] = 0.0
+        d[d < 0] = 0.0
+        return d
+
+    dpt_files = sorted(
+        os.path.join(gt_depth_dir, f)
+        for f in os.listdir(gt_depth_dir) if f.endswith(".dpt")
+    )[:len(image_paths)]
+
+    if not dpt_files:
+        raise FileNotFoundError(f"No .dpt files found in {gt_depth_dir}")
+
+    depths = []
+    orig_h = orig_w = None
+    for dpt_path in dpt_files:
+        d_full = _read_dpt(dpt_path)
+        if orig_h is None:
+            orig_h, orig_w = d_full.shape
+        if preprocess == "center_crop":
+            sq   = min(orig_w, orig_h)
+            left = (orig_w - sq) // 2
+            top  = (orig_h - sq) // 2
+            d_crop = d_full[top:top + sq, left:left + sq]
+            d_out  = cv2.resize(d_crop, (W, H), interpolation=cv2.INTER_LINEAR)
+        else:
+            d_out = cv2.resize(d_full, (W, H), interpolation=cv2.INTER_LINEAR)
+        depths.append(d_out.astype(np.float32))
+
+    return torch.from_numpy(np.stack(depths)).float().to(device)
+
+
 def _load_gt_pair_mask(
     gt_mask_dir: str,
     image_paths: list,
@@ -266,6 +319,36 @@ def save_outputs(output_dir: str, pts3d, depth, extrinsics, intrinsics,
     print(f"[vggt-dyn] results saved → {output_dir}")
 
 
+def _save_niter0_outputs(args, init, image_paths, original_coords, preprocess):
+    """Save raw VGGT init state when niter=0 (no TTO, no RAFT)."""
+    S = init.S
+    init_ext = torch.cat([init.R, init.T.unsqueeze(-1)], dim=-1)  # [S, 3, 4]
+    frame_mask = torch.zeros(S, 1, init.H, init.W, dtype=torch.bool, device=init.R.device)
+
+    conf_np = init.anchor_conf.detach().cpu().numpy()
+    conf_stats = {
+        "min": float(conf_np.min()), "max": float(conf_np.max()),
+        "mean": float(conf_np.mean()), "std": float(conf_np.std()),
+    }
+    metrics = {
+        "niter": 0,
+        "loss_init": None, "loss_final": None, "loss_history": [],
+        "preprocess": preprocess,
+        "anchor_conf_stats": conf_stats,
+        "freeze_pose": getattr(args, "freeze_pose", False),
+        "images_glob": args.images,
+        "image_paths": [os.path.relpath(p, args.output) for p in image_paths],
+    }
+    save_outputs(
+        args.output,
+        init.anchor_pts, init.depth, init_ext, init.K,
+        frame_mask, metrics,
+        original_coords=original_coords, preprocess=preprocess,
+        depth_conf=init.depth_conf,
+    )
+    np.save(os.path.join(args.output, "init_extrinsics.npy"), init_ext.cpu().numpy())
+
+
 # ===========================================================================
 # Main pipeline
 # ===========================================================================
@@ -279,6 +362,12 @@ def run_pipeline(args):
     device = torch.device(args.device if torch.cuda.is_available() else "cpu")
     print(f"[vggt-dyn] device = {device}")
 
+    init_dir = getattr(args, "init_dir", None)
+    if not init_dir and not getattr(args, "ckpt", None):
+        raise ValueError("Either --ckpt or --init_dir must be provided")
+    if args.niter > 0 and not getattr(args, "raft", None):
+        raise ValueError("--raft is required when niter > 0")
+
     # ── 1. Load images ────────────────────────────────────────────────────────
     image_paths = sorted(glob.glob(args.images))
     if not image_paths:
@@ -289,18 +378,66 @@ def run_pipeline(args):
     S = len(image_paths)
     print(f"[vggt-dyn] {S} images loaded")
 
-    # ── 2. VGGT feed-forward ──────────────────────────────────────────────────
-    print(f"[vggt-dyn] running VGGT (preprocess={args.preprocess}) ...")
-    vggt_model = load_vggt(args.ckpt, device)
-    vggt_out   = run_vggt(vggt_model, image_paths, device, preprocess=args.preprocess)
-    del vggt_model
-    torch.cuda.empty_cache()
+    # ── 2. VGGT feed-forward (or load from --init_dir) ───────────────────────
+    init_dir = getattr(args, "init_dir", None)
+    if init_dir:
+        print(f"[vggt-dyn] loading init state from {init_dir} ...")
+        init = VGGTInitializer.from_dir(init_dir, device)
+        H_vggt, W_vggt = init.H, init.W
+        original_coords = None
+        _preprocess = args.preprocess
+        print(f"[vggt-dyn] loaded: S={init.S}, H={H_vggt}, W={W_vggt}")
+    else:
+        vggt_model  = load_vggt(args.ckpt, device)
+        window_size = getattr(args, "window_size", 0)
+        _preprocess = args.preprocess
 
-    H_vggt = vggt_out["depth"].shape[2]
-    W_vggt = vggt_out["depth"].shape[3]
-    original_coords = vggt_out.pop("original_coords", None)
-    _preprocess     = vggt_out.pop("_preprocess", "letterbox")
-    print(f"[vggt-dyn] VGGT output: S={S}, H={H_vggt}, W={W_vggt}")
+        if window_size > 0:
+            # ── windowed VGGT (Scheme B): multi-window forward + pose graph ──
+            print(f"[vggt-dyn] windowed VGGT (W={window_size}, "
+                  f"stride={getattr(args, 'window_stride', 5)}, "
+                  f"preprocess={_preprocess}) ...")
+            from vggt_dyn.windowed_vggt import run_windowed_vggt
+            merged_state = run_windowed_vggt(
+                vggt_model, image_paths, device,
+                preprocess   = _preprocess,
+                window_size  = window_size,
+                stride       = getattr(args, "window_stride", 5),
+            )
+            del vggt_model
+            torch.cuda.empty_cache()
+
+            H_vggt = merged_state["depth"].shape[1]
+            W_vggt = merged_state["depth"].shape[2]
+            original_coords = None
+            print(f"[vggt-dyn] merged: S={S}, H={H_vggt}, W={W_vggt}")
+
+            init = VGGTInitializer.__new__(VGGTInitializer)
+            init.image_size_hw = (H_vggt, W_vggt)
+            init._state = merged_state
+
+        else:
+            # ── single-pass VGGT (original path) ────────────────────────────
+            print(f"[vggt-dyn] running VGGT (preprocess={_preprocess}) ...")
+            vggt_out = run_vggt(vggt_model, image_paths, device, preprocess=_preprocess)
+            del vggt_model
+            torch.cuda.empty_cache()
+
+            H_vggt = vggt_out["depth"].shape[2]
+            W_vggt = vggt_out["depth"].shape[3]
+            original_coords = vggt_out.pop("original_coords", None)
+            _preprocess     = vggt_out.pop("_preprocess", "letterbox")
+            print(f"[vggt-dyn] VGGT output: S={S}, H={H_vggt}, W={W_vggt}")
+
+            init = VGGTInitializer(vggt_out, (H_vggt, W_vggt))
+
+        init.to(device)
+
+    # niter=0: skip RAFT and TTO, save raw init state and return
+    if args.niter == 0:
+        print("[vggt-dyn] niter=0, skipping RAFT and TTO ...")
+        _save_niter0_outputs(args, init, image_paths, original_coords, _preprocess)
+        return
 
     # ── 3. RAFT optical flow ──────────────────────────────────────────────────
     print("[vggt-dyn] computing RAFT optical flow ...")
@@ -322,11 +459,16 @@ def run_pipeline(args):
 
     # ── 4. Initialise optimizer ───────────────────────────────────────────────
     print("[vggt-dyn] initialising optimizer ...")
-    init = VGGTInitializer(vggt_out, (H_vggt, W_vggt))
-    init.to(device)
-
     flow_fwd  = flow_fwd.to(device)
     valid_fwd = valid_fwd.to(device)
+
+    # ── GT depth injection (replaces VGGT depth at init, pose unchanged) ──────
+    gt_depth_dir = getattr(args, "gt_depth_dir", None)
+    if gt_depth_dir:
+        print(f"[vggt-dyn] injecting GT depth from {gt_depth_dir} ...")
+        gt_depth = _load_gt_depth(gt_depth_dir, image_paths, H_vggt, W_vggt, device, args.preprocess)
+        init._state["depth"] = gt_depth
+        print(f"[vggt-dyn] GT depth injected: median={gt_depth[gt_depth > 0].median():.3f}")
 
     if args.loss_version == "dyn":
         loss_fn = DynLoss(
