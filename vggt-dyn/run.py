@@ -45,8 +45,12 @@ def parse_args():
 
     # I/O
     p.add_argument("--images",      required=True,  help="glob pattern for input frames (e.g. 'frames/*.png')")
-    p.add_argument("--ckpt",        required=True,  help="VGGT checkpoint (.pt)")
-    p.add_argument("--raft",        required=True,  help="RAFT model weights (.pth)")
+    p.add_argument("--ckpt",        required=False, default=None, help="VGGT checkpoint (.pt); not needed when --init_dir is set")
+    p.add_argument("--init_dir",    default=None,
+                   help="load VGGT init state from a previous niter=0 run output directory "
+                        "(skips VGGT forward pass; RAFT still runs for TTO)")
+    p.add_argument("--raft",        required=False, default=None,
+                   help="RAFT model weights (.pth); not needed when --niter 0")
     p.add_argument("--output",      default="outputs/vggt_dyn", help="output directory")
     p.add_argument("--max_frames",  type=int, default=None,
                    help="cap number of frames (first N); useful to avoid OOM on long sequences")
@@ -90,6 +94,9 @@ def parse_args():
                    help="directory containing GT dynamic-mask PNGs (frame_XXXX.png, binary). "
                         "If set, masks are loaded from disk at init and NOT recomputed during TTO. "
                         "Expected file names must match the basenames of --images.")
+    p.add_argument("--gt_depth_dir",   default=None,
+                   help="directory containing GT depth .dpt files (Sintel format). "
+                        "If set, GT depth replaces VGGT depth at optimizer init; pose unchanged.")
 
     # Intermediate evaluation
     p.add_argument("--eval_every", type=int, default=0,
@@ -101,6 +108,13 @@ def parse_args():
     p.add_argument("--scale_flow_loss", action="store_true",
                    help="Exp C: per-pair stop-gradient scale normalization on flow loss "
                         "(removes ego_flow magnitude bias from TTO gradients)")
+
+    # Windowed VGGT (Scheme B)
+    p.add_argument("--window_size",   type=int, default=0,
+                   help="if >0, run VGGT on overlapping windows of this size and merge "
+                        "with pose graph optimization before TTO (0 = single forward pass)")
+    p.add_argument("--window_stride", type=int, default=5,
+                   help="stride between window starts (default: 5)")
 
     # Misc
     p.add_argument("--device",  default="cuda")

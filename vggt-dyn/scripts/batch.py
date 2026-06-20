@@ -274,14 +274,24 @@ def _depth_run(args, sequences: List[Dict]) -> int:
 
             image_glob = _image_glob_depth(args, scene_name)
             cmd = [sys.executable, run_py,
-                   "--images", image_glob, "--ckpt", args.ckpt, "--raft", args.raft,
+                   "--images", image_glob,
                    "--output", out_dir, "--preprocess", args.preprocess,
                    "--niter", str(args.niter), "--loss_version", args.loss_version,
                    "--device", args.device]
+            if args.ckpt:
+                cmd += ["--ckpt", args.ckpt]
+            if args.raft:
+                cmd += ["--raft", args.raft]
             if args.max_frames:
                 cmd += ["--max_frames", str(args.max_frames)]
             if args.verbose:
                 cmd += ["--verbose"]
+            if getattr(args, "eval_every", 0) > 0:
+                cmd += ["--eval_every", str(args.eval_every)]
+            for flag in ("flow_weight", "anchor_weight", "depth_reg_weight", "smooth_weight"):
+                val = getattr(args, flag, None)
+                if val is not None:
+                    cmd += [f"--{flag}", str(val)]
 
             rc = _run_cmd(cmd, args.dry_run)
             if rc != 0:
@@ -374,8 +384,11 @@ def _pose_run(args, sequences: List[str]) -> int:
     run_py = os.path.join(_PROJECT_DIR, "run.py")
     if not os.path.isfile(run_py):
         raise FileNotFoundError(f"run.py not found: {run_py}")
-    if not args.ckpt or not args.raft:
-        raise ValueError("--ckpt and --raft are required for stage=run/all")
+    has_init_root = bool(getattr(args, "init_root", None))
+    if not has_init_root and not args.ckpt:
+        raise ValueError("--ckpt is required unless --init_root is set")
+    if args.niter > 0 and not args.raft:
+        raise ValueError("--raft is required when niter > 0")
 
     os.makedirs(args.output_root, exist_ok=True)
     exit_code = 0
@@ -388,14 +401,38 @@ def _pose_run(args, sequences: List[str]) -> int:
 
         image_glob = os.path.join(args.image_dir, seq, "*.png")
         cmd = [sys.executable, run_py,
-               "--images", image_glob, "--ckpt", args.ckpt, "--raft", args.raft,
+               "--images", image_glob,
                "--output", out_dir, "--preprocess", args.preprocess,
                "--niter", str(args.niter), "--loss_version", args.loss_version,
                "--device", args.device]
+        if args.ckpt:
+            cmd += ["--ckpt", args.ckpt]
+        if args.raft:
+            cmd += ["--raft", args.raft]
         if args.max_frames:
             cmd += ["--max_frames", str(args.max_frames)]
         if args.verbose:
             cmd += ["--verbose"]
+        if getattr(args, "eval_every", 0) > 0:
+            cmd += ["--eval_every", str(args.eval_every)]
+        for flag in (
+            "lr", "lr_min",
+            "anchor_weight", "flow_weight", "depth_reg_weight", "smooth_weight",
+            "translation_weight", "flow_loss_start_frac", "flow_loss_thre", "pxl_thre",
+            "dyn_pointmap_weight", "track_smooth_weight",
+            "mask_refresh", "mask_threshold",
+        ):
+            val = getattr(args, flag, None)
+            if val is not None:
+                cmd += [f"--{flag}", str(val)]
+        if getattr(args, "freeze_pose", False):
+            cmd += ["--freeze_pose"]
+        if getattr(args, "window_size", 0) > 0:
+            cmd += ["--window_size", str(args.window_size),
+                    "--window_stride", str(getattr(args, "window_stride", 5))]
+        init_root = getattr(args, "init_root", None)
+        if init_root:
+            cmd += ["--init_dir", os.path.join(init_root, seq)]
         gt_mask_root = getattr(args, "gt_mask_dir", None)
         if gt_mask_root:
             cmd += ["--gt_mask_dir", os.path.join(gt_mask_root, seq)]
@@ -480,6 +517,98 @@ def _pose_eval(args, sequences: List[str]) -> int:
         with open(spath, "w") as f:
             json.dump(summary, f, indent=2)
         print(f"[done] summary → {spath}")
+    return exit_code
+
+
+def _pose_eval_iters(args, sequences: List[str]) -> int:
+    """Evaluate pose at each saved checkpoint (iter_XXXX/) for every sequence.
+
+    Produces sintel_pose_summary_iters.json with ATE/RPE at each iter,
+    enabling ATE-vs-iter learning curves.
+    """
+    eval_py = os.path.join(_PROJECT_DIR, "eval.py")
+    exit_code = 0
+
+    # Discover which iters exist across all sequences
+    all_iters: set = set()
+    for seq in sequences:
+        ckpt_root = os.path.join(args.output_root, seq, "checkpoints")
+        if not os.path.isdir(ckpt_root):
+            continue
+        for name in os.listdir(ckpt_root):
+            if name.startswith("iter_") and os.path.isdir(os.path.join(ckpt_root, name)):
+                try:
+                    all_iters.add(int(name[5:]))
+                except ValueError:
+                    pass
+
+    if not all_iters:
+        print("[warn] no checkpoints/iter_XXXX dirs found; skipping per-iter eval")
+        return 0
+
+    sorted_iters = sorted(all_iters)
+    print(f"[info] per-iter eval  iters={sorted_iters}  sequences={len(sequences)}")
+
+    per_iter: Dict = {}
+
+    for it in sorted_iters:
+        iter_name = f"iter_{it:04d}"
+        rows: List[Dict] = []
+
+        for seq in sequences:
+            ckpt_dir = os.path.join(args.output_root, seq, "checkpoints", iter_name)
+            if not os.path.isdir(ckpt_dir):
+                print(f"  [skip] {seq} iter={it} (dir missing)")
+                continue
+
+            gt_cam_dir = os.path.join(args.gt_dir, seq)
+            result_json = os.path.join(ckpt_dir, "eval_sintel_pose.json")
+
+            cmd = [sys.executable, eval_py, "sintel_pose",
+                   "--output_dir", ckpt_dir,
+                   "--gt_cam_dir", gt_cam_dir,
+                   "--pose_eval_stride", str(args.pose_eval_stride)]
+
+            rc = _run_cmd(cmd, args.dry_run)
+            if rc != 0:
+                print(f"  [error] eval failed: {seq} iter={it}")
+                exit_code = rc
+                if not args.continue_on_error:
+                    return exit_code
+                continue
+
+            if args.dry_run:
+                continue
+
+            if os.path.isfile(result_json):
+                with open(result_json) as f:
+                    m = json.load(f)
+                m["sequence"] = seq
+                rows.append(m)
+
+        if not args.dry_run and rows:
+            avg_ate   = float(sum(r["ate"]       for r in rows) / len(rows))
+            avg_rpe_t = float(sum(r["rpe_trans"] for r in rows) / len(rows))
+            avg_rpe_r = float(sum(r["rpe_rot"]   for r in rows) / len(rows))
+            per_iter[it] = {
+                "per_sequence": rows,
+                "mean": {"ate": avg_ate, "rpe_trans": avg_rpe_t, "rpe_rot": avg_rpe_r},
+            }
+            print(f"[iter {it:4d}] mean ATE={avg_ate:.5f}  RPE_t={avg_rpe_t:.5f}  RPE_r={avg_rpe_r:.5f}")
+
+    if not args.dry_run and per_iter:
+        summary = {
+            "dataset": "sintel",
+            "iters": sorted_iters,
+            "sequences": sequences,
+            "eval_every": getattr(args, "eval_every", 0),
+            "per_iter": {str(it): v for it, v in per_iter.items()},
+        }
+        spath = os.path.join(args.output_root, "sintel_pose_summary_iters.json")
+        with open(spath, "w") as f:
+            json.dump(summary, f, indent=2)
+        print(f"[done] iter summary → {spath}")
+
     return exit_code
 
 
@@ -641,6 +770,8 @@ def _resolve_paths_pose(args):
     args.output_root = _abs(args.output_root or "outputs/sintel_pose_batch",             base)
     if args.ckpt: args.ckpt = _abs(args.ckpt, base)
     if args.raft: args.raft = _abs(args.raft, base)
+    if getattr(args, "init_root", None):
+        args.init_root = _abs(args.init_root, base)
     if getattr(args, "gt_mask_dir", None):
         args.gt_mask_dir = _abs(args.gt_mask_dir, base)
 
@@ -677,6 +808,33 @@ def _add_run_opts(p: argparse.ArgumentParser):
     p.add_argument("--device",      default="cuda")
     p.add_argument("--max_frames",  type=int, default=None)
     p.add_argument("--verbose",     action="store_true")
+    p.add_argument("--eval_every",  type=int, default=0,
+                   help="save optimizer checkpoint every N iters for per-iter pose eval (0=off)")
+    # optimizer
+    p.add_argument("--lr",     type=float, default=None, help="peak learning rate (None = run.py default 1e-3)")
+    p.add_argument("--lr_min", type=float, default=None, help="min learning rate (None = run.py default 1e-5)")
+    # mon loss weights (None = use run.py defaults)
+    p.add_argument("--anchor_weight",        type=float, default=None)
+    p.add_argument("--flow_weight",          type=float, default=None)
+    p.add_argument("--depth_reg_weight",     type=float, default=None)
+    p.add_argument("--smooth_weight",        type=float, default=None)
+    p.add_argument("--translation_weight",   type=float, default=None)
+    p.add_argument("--flow_loss_start_frac", type=float, default=None)
+    p.add_argument("--flow_loss_thre",       type=float, default=None)
+    p.add_argument("--pxl_thre",             type=float, default=None)
+    # dyn loss weights
+    p.add_argument("--dyn_pointmap_weight",  type=float, default=None)
+    p.add_argument("--track_smooth_weight",  type=float, default=None)
+    # dynamic mask
+    p.add_argument("--mask_refresh",   type=int,   default=None)
+    p.add_argument("--mask_threshold", type=float, default=None)
+    # flags
+    p.add_argument("--freeze_pose", action="store_true")
+    # windowed VGGT (Scheme B)
+    p.add_argument("--window_size",   type=int, default=0,
+                   help="if >0, use multi-window VGGT + pose graph before TTO (0=off)")
+    p.add_argument("--window_stride", type=int, default=5,
+                   help="stride between windows for windowed VGGT (default: 5)")
 
 
 def _add_depth_eval_opts(p: argparse.ArgumentParser):
@@ -723,8 +881,12 @@ def parse_args():
     pp.add_argument("--output_root", default=None)
     _add_batch_opts(pp)
     _add_run_opts(pp)
-    pp.set_defaults(preprocess="center_crop", niter=300)  # override defaults for pose
+    pp.set_defaults(preprocess="center_crop", niter=150)  # override defaults for pose
     pp.add_argument("--pose_eval_stride", type=int, default=1)
+    pp.add_argument("--init_root", default=None,
+                    help="root dir of a previous niter=0 run (e.g. outputs/exp003_ft_init). "
+                         "Each seq subfolder is passed as --init_dir to run.py, "
+                         "skipping VGGT forward pass and reusing the saved init state.")
     pp.add_argument("--gt_mask_dir", default=None,
                     help="root dir of GT dynamic-mask PNGs (e.g. data/sintel/training/dynamic_label). "
                          "Each seq subfolder must contain frame_XXXX.png files. "
@@ -803,7 +965,10 @@ def main():
             if rc != 0 and not args.continue_on_error:
                 sys.exit(rc)
         if args.stage in ("eval", "all"):
-            rc2 = _pose_eval(args, sequences)
+            if getattr(args, "eval_every", 0) > 0:
+                rc2 = _pose_eval_iters(args, sequences)
+            else:
+                rc2 = _pose_eval(args, sequences)
             rc = rc or rc2
 
     elif args.subcommand == "mask":
