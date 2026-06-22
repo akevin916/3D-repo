@@ -1,7 +1,7 @@
 data/
-vggt-dyn/finetune/checkpoints/*.pt
-vggt-dyn/vggt/checkpoints/*.pt
 *.pt
 *.pth
+
 vggt-dyn/scripts/exp/
+monst3r/outputs/
 docs/
